@@ -18,11 +18,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ),
       ];
 
+      console.log("Product IDs being fetched:", productIds);
+
       const { admin } = await authenticate.admin(request);
 
       let productMap = new Map();
 
       if (productIds.length > 0) {
+        console.log("RAW line item:", JSON.stringify(line_items, null, 2));
         const response = await admin.graphql(`
           query ($ids: [ID!]!) {
             nodes(ids: $ids) {
