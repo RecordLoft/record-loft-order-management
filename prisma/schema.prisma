@@ -32,32 +32,32 @@ model Session {
 }
 
 model Order {
-  id              String     @id // Shopify Order ID (e.g. "gid://shopify/Order/12345")
-  orderNumber     Int        @unique
-  shop            String
-  totalPrice      Decimal    @db.Decimal(10, 2)
-  currency        String
-  createdAt       DateTime   @default(now())
+  id           BigInt    @id // Raw Shopify ID (e.g., 123456789)
+  orderNumber  Int       @unique
+  shop         String
+  totalPrice   Decimal   @db.Decimal(10, 2)
+  currency     String
+  createdAt    DateTime  @default(now())
   
   // Relationships
-  customer        Customer?  @relation(fields: [customerId], references: [id])
-  customerId      String?
-  lineItems       LineItem[]
+  customer     Customer? @relation(fields: [customerId], references: [id])
+  customerId   BigInt?   // Must match Customer.id type
+  lineItems    LineItem[]
 }
 
 model LineItem {
-  id          String  @id // Shopify Line Item ID
-  orderId     String
-  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  title       String
-  quantity    Int
-  price       Decimal @db.Decimal(10, 2)
-  variantId   String?
-  sku         String?
+  id        BigInt  @id
+  orderId   BigInt  // Must match Order.id type
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  title     String
+  quantity  Int
+  price     Decimal @db.Decimal(10, 2)
+  variantId BigInt? // Raw variant ID
+  sku       String?
 }
 
 model Customer {
-  id        String  @id // Shopify Customer ID
+  id        BigInt  @id
   email     String?
   firstName String?
   lastName  String?
