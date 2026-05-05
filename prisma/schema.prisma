@@ -2,9 +2,9 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider        = "prisma-client-js"
+  provider        = "prisma-client"
   output   = "../generated/prisma"
-  previewFeatures = ["driverAdapters"]
+  moduleFormat = "esm"
 }
 
 datasource db {
@@ -29,4 +29,37 @@ model Session {
   emailVerified Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+model Order {
+  id              String     @id // Shopify Order ID (e.g. "gid://shopify/Order/12345")
+  orderNumber     Int        @unique
+  shop            String
+  totalPrice      Decimal    @db.Decimal(10, 2)
+  currency        String
+  createdAt       DateTime   @default(now())
+  
+  // Relationships
+  customer        Customer?  @relation(fields: [customerId], references: [id])
+  customerId      String?
+  lineItems       LineItem[]
+}
+
+model LineItem {
+  id          String  @id // Shopify Line Item ID
+  orderId     String
+  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  title       String
+  quantity    Int
+  price       Decimal @db.Decimal(10, 2)
+  variantId   String?
+  sku         String?
+}
+
+model Customer {
+  id        String  @id // Shopify Customer ID
+  email     String?
+  firstName String?
+  lastName  String?
+  orders    Order[]
 }

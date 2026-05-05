@@ -1,5 +1,5 @@
 import { Session } from '@shopify/shopify-api';
-import { Prisma } from "../prisma/generated/client";
+import { Prisma } from "../generated/prisma/client";
 
 const UNIQUE_KEY_CONSTRAINT_ERROR_CODE = 'P2002';
 class PrismaSessionStorage {
