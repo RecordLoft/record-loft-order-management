@@ -9,12 +9,66 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (topic === "ORDERS_CREATE") {
     try {
       const { id, order_number, total_price, currency, line_items, customer } = payload;
+
+      const productIds = [
+        ...new Set(
+          line_items
+            .map((item: any) => item.product_id)
+            .filter(Boolean)
+        ),
+      ];
+
+      const { admin } = await authenticate.admin(request);
+
+      let productMap = new Map();
+
+      if (productIds.length > 0) {
+        const response = await admin.graphql(`
+          query ($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on Product {
+                id
+                productType
+        
+                category {
+                  productTaxonomyNode {
+                    name
+                  }
+                }
+        
+                storeSection: metafield(namespace: "custom", key: "store_section") {
+                  value
+                }
+              }
+            }
+          }
+        `, {
+          variables: {
+            ids: productIds.map(id => `gid://shopify/Product/${id}`)
+          }
+        });
+
+        const json = await response.json();
+
+        json.data.nodes.forEach((p: any) => {
+          if (!p) return;
+
+          const numericId = p.id.split("/").pop();
+
+          productMap.set(numericId, {
+            productType: p.productType,
+            storeSection: p.storeSection?.value ?? null,
+            category: p.category?.productTaxonomyNode?.name ?? null,
+          });
+        });
+      }
+
       console.log("Attempting to import order " + BigInt(id))
 
       await prisma.order.upsert({
         // Convert the raw ID to BigInt
-        where: { id: BigInt(id) }, 
-        update: {}, 
+        where: { id: BigInt(id) },
+        update: {},
         create: {
           id: BigInt(id),
           orderNumber: order_number,
@@ -35,14 +89,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           } : undefined,
           // Handle Line Items with BigInt
           lineItems: {
-            create: line_items.map((item: any) => ({
-              id: BigInt(item.id),
-              title: item.title,
-              quantity: item.quantity,
-              price: item.price,
-              variantId: item.variant_id ? BigInt(item.variant_id) : null,
-              sku: item.sku,
-            })),
+            create: line_items.map((item: any) => {
+              const enrichment = productMap.get(item.product_id?.toString());
+
+              return {
+                id: BigInt(item.id),
+                title: item.title,
+                quantity: item.quantity,
+                price: item.price,
+                variantId: item.variant_id ? BigInt(item.variant_id) : null,
+                sku: item.sku,
+
+                properties: item.properties ?? null,
+
+                productType: enrichment?.productType ?? null,
+                storeSection: enrichment?.storeSection ?? null,
+                category: enrichment?.category ?? null,
+              };
+            }),
           },
         },
       });
@@ -54,5 +118,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  return new Response(); 
+  return new Response();
 };

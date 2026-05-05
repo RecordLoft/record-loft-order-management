@@ -54,6 +54,10 @@ model LineItem {
   price     Decimal @db.Decimal(10, 2)
   variantId BigInt? // Raw variant ID
   sku       String?
+  properties Json?
+  productType   String?
+  category String?
+  storeSection  String?
 }
 
 model Customer {
