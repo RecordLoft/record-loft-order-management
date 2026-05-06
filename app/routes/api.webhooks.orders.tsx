@@ -15,14 +15,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const threadId = crypto.randomUUID();
   if (topic === "ORDERS_CREATE" && admin) {
     try {
-      const { id, order_number, total_price, currency, line_items, customer } = payload;
+      const { id, order_number, total_price, currency, line_items, customer, source_name, shipping_lines } = payload;
 
       const productIds = [
         ...new Set(
           line_items
             .map((item: any) => item.product_id)
-            .filter(Boolean)
-        ),
+            .filter((id: any) => id !== null && id !== undefined))
       ];
 
       let productMap = new Map();
@@ -69,6 +68,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`)
+
+      let deliveryMethod: string | null = "shipping";
+
+      console.log(`[${threadId}] Source name: ${source_name}`);
+      console.log(`[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`);
+      console.log(`[${threadId}] Line items: ${JSON.stringify(line_items)}`);
+      if (source_name === "pos") {
+        deliveryMethod = null;
+      } else {
+        // Check for Record Planet override first (highest priority for online orders)
+        const hasRecordPlanetItem = line_items.some((item: any) => {
+          const enrichment = productMap.get(item.product_id?.toString());
+          return enrichment?.productType === "Record Planet Shipping";
+        });
+
+        if (hasRecordPlanetItem) {
+          deliveryMethod = "recordPlanet";
+        }
+
+        else if (shipping_lines?.some((line: any) => line.source === "p_u")) {
+          deliveryMethod = "pickup";
+        }
+      }
+
+      console.log(`[${threadId}] Order ${id} source: ${source_name}, method: ${deliveryMethod}`);
 
       await prisma.order.upsert({
         // Convert the raw ID to BigInt
