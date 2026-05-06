@@ -2,6 +2,14 @@ import { type ActionFunctionArgs } from "@remix-run/node";
 import { prisma } from "../db.server";
 import { authenticate } from "../shopify.server";
 
+const flattenProperties = (properties: { name: string, value: string }[]) => {
+  if (!properties || !Array.isArray(properties)) return {};
+  return properties.reduce((acc, prop) => {
+    acc[prop.name] = prop.value;
+    return acc;
+  }, {} as Record<string, string>);
+};
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
 
@@ -94,7 +102,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variantId: item.variant_id ? BigInt(item.variant_id) : null,
                 sku: item.sku,
 
-                properties: item.properties ?? null,
+                properties: flattenProperties(item.properties ?? []),
 
                 productType: enrichment?.productType ?? null,
                 storeSection: enrichment?.storeSection ?? null,
