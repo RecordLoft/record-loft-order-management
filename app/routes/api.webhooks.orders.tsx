@@ -25,28 +25,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ];
 
       let productMap = new Map();
+      let deliveryMethod: string | null = null;
 
       if (productIds.length > 0) {
         console.log(`[${threadId}] Fetching product information for IDs:`, productIds);
         const response = await admin.graphql(`
-          query ($ids: [ID!]!) {
-            nodes(ids: $ids) {
+          query getOrderEnrichment($orderId: ID!, $productIds: [ID!]!) {
+            order(id: $orderId) {
+              fulfillmentOrders(first: 1) {
+                nodes {
+                  deliveryMethod {
+                    methodType
+                  }
+                }
+              }
+            }
+            nodes(ids: $productIds) {
               ... on Product {
                 id
                 productType
-                # Updated section below
-                category {
-                  name
-                }
-                storeSection: metafield(namespace: "custom", key: "store_section") {
-                  value
-                }
+                category { name }
+                storeSection: metafield(namespace: "custom", key: "store_section") { value }
               }
             }
           }
         `, {
           variables: {
-            ids: productIds.map(id => `gid://shopify/Product/${id}`)
+            orderId: `gid://shopify/Order/${id}`,
+            productIds: productIds.map(pid => `gid://shopify/Product/${pid}`)
           }
         });
 
@@ -64,36 +70,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           });
         });
 
-        console.log(`[${threadId}] Product map:`, productMap);
-      }
+        deliveryMethod = json.data.order?.fulfillmentOrders?.nodes[0]?.deliveryMethod?.methodType?.toLowerCase() || null;
 
-      console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`)
 
-      let deliveryMethod: string | null = "shipping";
-
-      console.log(`[${threadId}] Source name: ${source_name}`);
-      console.log(`[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`);
-      console.log(`[${threadId}] Line items: ${JSON.stringify(line_items)}`);
-      console.log(`[${threadId}] Payload: ${JSON.stringify(payload)}`);
-      if (source_name === "pos") {
-        deliveryMethod = null;
-      } else {
-        // Check for Record Planet override first (highest priority for online orders)
-        const hasRecordPlanetItem = line_items.some((item: any) => {
-          const enrichment = productMap.get(item.product_id?.toString());
-          return enrichment?.productType === "Record Planet Shipping";
-        });
+        const hasRecordPlanetItem = line_items.some((item: any) =>
+          productMap.get(item.product_id?.toString())?.productType === "Record Planet Shipping"
+        );
 
         if (hasRecordPlanetItem) {
           deliveryMethod = "recordPlanet";
         }
 
-        else if (shipping_lines?.some((line: any) => line.source === "p_u")) {
-          deliveryMethod = "pickup";
-        }
+        console.log(`[${threadId}] Product map:`, productMap);
+        console.log(`[${threadId}] Delivery method: ${deliveryMethod}`);
       }
 
-      console.log(`[${threadId}] Order ${id} source: ${source_name}, method: ${deliveryMethod}`);
+
+      console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`)
+
+
+      console.log(`[${threadId}] Source name: ${source_name}`);
+      console.log(`[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`);
+      console.log(`[${threadId}] Line items: ${JSON.stringify(line_items)}`);
+      console.log(`[${threadId}] Payload: ${JSON.stringify(payload)}`);
 
       await prisma.order.upsert({
         // Convert the raw ID to BigInt
@@ -105,6 +104,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           shop: shop,
           totalPrice: total_price,
           currency: currency,
+          deliveryMethod: deliveryMethod,
           // Handle Customer with BigInt
           customer: customer ? {
             connectOrCreate: {
