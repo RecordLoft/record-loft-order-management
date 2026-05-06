@@ -2,11 +2,10 @@ import { type ActionFunctionArgs } from "@remix-run/node";
 import { prisma } from "../db.server";
 import { authenticate } from "../shopify.server";
 
-
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { topic, shop, payload } = await authenticate.webhook(request);
+  const { topic, shop, payload, admin } = await authenticate.webhook(request);
 
-  if (topic === "ORDERS_CREATE") {
+  if (topic === "ORDERS_CREATE" && admin) {
     try {
       const { id, order_number, total_price, currency, line_items, customer } = payload;
 
@@ -17,10 +16,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             .filter(Boolean)
         ),
       ];
-
-      console.log("Product IDs being fetched:", productIds);
-      console.log("Line items:", JSON.stringify(line_items, null, 2));
-      const { admin } = await authenticate.admin(request);
 
       let productMap = new Map();
 
