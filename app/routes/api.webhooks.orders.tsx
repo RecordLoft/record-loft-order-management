@@ -26,13 +26,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               ... on Product {
                 id
                 productType
-        
+                # Updated section below
                 category {
-                  productTaxonomyNode {
-                    name
-                  }
+                  name
                 }
-        
                 storeSection: metafield(namespace: "custom", key: "store_section") {
                   value
                 }
@@ -55,7 +52,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           productMap.set(numericId, {
             productType: p.productType,
             storeSection: p.storeSection?.value ?? null,
-            category: p.category?.productTaxonomyNode?.name ?? null,
+            category: p.category?.name ?? null,
           });
         });
       }
