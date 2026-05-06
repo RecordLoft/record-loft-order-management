@@ -12,7 +12,7 @@ const flattenProperties = (properties: { name: string, value: string }[]) => {
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
-
+  const threadId = crypto.randomUUID();
   if (topic === "ORDERS_CREATE" && admin) {
     try {
       const { id, order_number, total_price, currency, line_items, customer } = payload;
@@ -28,6 +28,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       let productMap = new Map();
 
       if (productIds.length > 0) {
+        console.log(`[${threadId}] Fetching product information for IDs:`, productIds);
         const response = await admin.graphql(`
           query ($ids: [ID!]!) {
             nodes(ids: $ids) {
@@ -63,9 +64,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             category: p.category?.name ?? null,
           });
         });
+
+        console.log(`[${threadId}] Product map:`, productMap);
       }
 
-      console.log("Attempting to import order " + BigInt(id))
+      console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`)
 
       await prisma.order.upsert({
         // Convert the raw ID to BigInt
@@ -113,9 +116,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
 
-      console.log("Imported order " + BigInt(id))
+      console.log(`[${threadId}] Imported order ${BigInt(id)}`)
     } catch (error) {
-      console.error(`Error syncing order ${payload.id}:`, error);
+      console.error(`[${threadId}] Error syncing order ${payload.id}:`, error);
       return new Response("Error processed", { status: 500 });
     }
   }
