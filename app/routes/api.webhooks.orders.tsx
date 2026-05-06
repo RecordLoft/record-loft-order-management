@@ -74,6 +74,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       console.log(`[${threadId}] Source name: ${source_name}`);
       console.log(`[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`);
       console.log(`[${threadId}] Line items: ${JSON.stringify(line_items)}`);
+      console.log(`[${threadId}] Payload: ${JSON.stringify(payload)}`);
       if (source_name === "pos") {
         deliveryMethod = null;
       } else {
