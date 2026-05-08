@@ -1,4 +1,5 @@
 import { AppProvider as PolarisProvider } from "@shopify/polaris";
+import '@shopify/polaris/build/esm/styles.css';
 import enTranslations from "@shopify/polaris/locales/en.json";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -22,8 +23,8 @@ export default function App() {
       <PolarisProvider i18n={enTranslations}>
         <ui-nav-menu>
           <a href="/app/shipping">Shipping</a>
-          <a href="/app/pickup">Pickup</a>
-          <a href="/app/recordPlanet">Record Planet</a>
+          {/* <a href="/app/pickup">Pickup</a>
+          <a href="/app/recordPlanet">Record Planet</a> */}
         </ui-nav-menu>
         <Outlet />
       </PolarisProvider>
