@@ -1,4 +1,5 @@
-import { render } from 'preact';
+/// <reference types="@shopify/ui-extensions" />
+// import { render } from 'preact';
 
 declare var shopify: any;
 
@@ -19,8 +20,7 @@ function Extension() {
   const printUrl = `/print/pick-list?ids=${ids}`;
 
   return (
-    // @ts-ignore
-    <s-admin-action title="Print Pick List">
+    <s-admin-action title="Generate Pick List">
       {ids ? (
         // @ts-ignore
         <s-admin-print-action src={printUrl} />

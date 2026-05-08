@@ -5,9 +5,13 @@
     "target": "ES2020",
     "checkJs": true,
     "allowJs": true,
-    "moduleResolution": "Bundler",
+    "moduleResolution": "node",
     "esModuleInterop": true,
-    "noEmit": true,
-    "skipLibCheck": true
+    "outDir": "./dist",
+    "types": ["@shopify/app-bridge-types", "@shopify/polaris-types"],
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true
   }
 }
