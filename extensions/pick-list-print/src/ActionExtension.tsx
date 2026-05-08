@@ -1,5 +1,4 @@
-/// <reference types="@shopify/ui-extensions" />
-// import { render } from 'preact';
+import { render } from 'preact';
 
 declare var shopify: any;
 
