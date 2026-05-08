@@ -23,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const orders = await prisma.order.findMany({
     where: {
-      shop: session.shop,
+      // shop: session.shop,
       deliveryMethod: "shipping",
     },
     include: {
@@ -178,6 +178,21 @@ export default function ShippingOrders() {
                     navigate(`/app/pick-list?ids=${ids}`);
                   },
                 },
+                {
+                  content: "Generate Shipping Labels",
+                  onAction: () => {
+                    // 1. Extract the numeric IDs from the GIDs
+                    const ids = selectedResources
+                      .map(id => id.split("/").pop())
+                      .join(",");
+
+                    // 2. Build the Shopify Bulk Shipping URL
+                    const bulkUrl = `https://${shop}/admin/bulk?resource_name=Order&edit=shipping_labels&ids=${ids}`;
+
+                    // 3. Open in a new tab
+                    window.open(bulkUrl, '_blank');
+                  },
+                }
               ]}
             >
               {rowMarkup}

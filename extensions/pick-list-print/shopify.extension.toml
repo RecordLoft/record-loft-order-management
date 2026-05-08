@@ -1,0 +1,12 @@
+api_version = "2025-10"
+[[extensions]]
+# Change the merchant-facing name of the extension in locales/en.default.json
+name = "t:name"
+handle = "pick-list-print"
+type = "ui_extension"
+uid = "6d29af41-0380-6640-e80d-e720d7e07d5544b24d7a"
+
+# Only 1 target can be specified for each Admin action extension
+[[extensions.targeting]]
+target = "admin.order-index.selection-print-action.render"
+module="./src/ActionExtension.tsx"
