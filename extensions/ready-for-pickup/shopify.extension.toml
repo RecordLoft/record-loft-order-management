@@ -1,0 +1,10 @@
+api_version = "2025-10"
+uid = "fde06bbc-5055-6275-230d-198e649adb0c1a9b12d8"
+[[extensions]]
+type = "ui_extension"
+name = "Mark Ready for Pickup"
+handle = "ready-for-pickup"
+
+[[extensions.targeting]]
+target = "admin.order-index.selection-action.render"
+module = "./src/ActionExtension.tsx"
