@@ -22,9 +22,7 @@ export default function App() {
     <AppProvider embedded apiKey={apiKey}>
       <PolarisProvider i18n={enTranslations}>
         <ui-nav-menu>
-          <a href="/app/shipping">Shipping</a>
-          {/* <a href="/app/pickup">Pickup</a>
-          <a href="/app/recordPlanet">Record Planet</a> */}
+          <a href="/app/record-planet">Record Planet</a>
         </ui-nav-menu>
         <Outlet />
       </PolarisProvider>

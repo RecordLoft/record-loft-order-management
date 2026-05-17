@@ -10,6 +10,17 @@ const flattenProperties = (properties: { name: string, value: string }[]) => {
   }, {} as Record<string, string>);
 };
 
+const resolveCustomerPhone = (payload: any) => {
+  const { customer, phone, billing_address, shipping_address } = payload;
+  return (
+    customer?.phone ??
+    phone ??
+    billing_address?.phone ??
+    shipping_address?.phone ??
+    null
+  );
+};
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
   const threadId = crypto.randomUUID();
@@ -94,10 +105,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       console.log(`[${threadId}] Line items: ${JSON.stringify(line_items)}`);
       console.log(`[${threadId}] Payload: ${JSON.stringify(payload)}`);
 
+      const customerPhone = resolveCustomerPhone(payload);
+
       await prisma.order.upsert({
         // Convert the raw ID to BigInt
         where: { id: BigInt(id) },
-        update: {},
+        update: {
+          deliveryMethod: deliveryMethod,
+        },
         create: {
           id: BigInt(id),
           orderNumber: order_number,
@@ -114,6 +129,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 email: customer.email,
                 firstName: customer.first_name,
                 lastName: customer.last_name,
+                phone: customerPhone,
               }
             }
           } : undefined,
@@ -140,6 +156,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         },
       });
+
+      if (customer) {
+        await prisma.customer.upsert({
+          where: { id: BigInt(customer.id) },
+          update: {
+            email: customer.email,
+            firstName: customer.first_name,
+            lastName: customer.last_name,
+            phone: customerPhone,
+          },
+          create: {
+            id: BigInt(customer.id),
+            email: customer.email,
+            firstName: customer.first_name,
+            lastName: customer.last_name,
+            phone: customerPhone,
+          },
+        });
+      }
 
       console.log(`[${threadId}] Imported order ${BigInt(id)}`)
     } catch (error) {

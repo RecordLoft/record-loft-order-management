@@ -64,6 +64,7 @@ model LineItem {
 model Customer {
   id        BigInt  @id
   email     String?
+  phone     String?
   firstName String?
   lastName  String?
   orders    Order[]
