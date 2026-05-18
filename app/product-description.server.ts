@@ -31,22 +31,41 @@ export function metafieldLookupKey(namespace: string, key: string): string {
   return `${namespace}.${key}`;
 }
 
+export function isSetMetafieldValue(
+  value: string | undefined | null,
+): value is string {
+  return Boolean(value?.trim());
+}
+
 export function parseMetafieldValue(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
 
   if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) {
+        const parts = parsed
+          .map((item) => String(item ?? "").trim())
+          .filter(isSetMetafieldValue);
+        return parts.join(", ");
+      }
+    } catch {
+      // fall through to legacy string cleanup
+    }
     return trimmed
       .replace(/[\[\]"]/g, "")
-      .replace(/,/g, ", ")
-      .trim();
+      .split(",")
+      .map((part) => part.trim())
+      .filter(isSetMetafieldValue)
+      .join(", ");
   }
 
   if (trimmed.startsWith('"')) {
     try {
-      return String(JSON.parse(trimmed));
+      return String(JSON.parse(trimmed)).trim();
     } catch {
-      return trimmed.slice(1, -1);
+      return trimmed.slice(1, -1).trim();
     }
   }
 
@@ -79,8 +98,8 @@ export function selectedMetafieldsFromAll(
   ) as VinylMetafields;
 
   for (const field of DESCRIPTION_METAFIELDS) {
-    const value = index.get(metafieldLookupKey(field.namespace, field.key));
-    if (value) fields[field.key] = value;
+    const value = index.get(metafieldLookupKey(field.namespace, field.key))?.trim();
+    if (isSetMetafieldValue(value)) fields[field.key] = value;
   }
 
   return fields;
@@ -100,21 +119,23 @@ export function stripHiddenRecordBlock(descriptionHtml: string): string {
   return html.slice(0, index).trim();
 }
 
-function hasSelectedDetails(fields: VinylMetafields): boolean {
-  return DESCRIPTION_METAFIELDS.some((field) => fields[field.key]?.trim());
-}
-
-function buildHiddenRecordBlock(fields: VinylMetafields): string {
-  const parts: string[] = ["### RECORD DETAILS"];
+function recordDetailLines(fields: VinylMetafields): string[] {
+  const lines: string[] = [];
 
   for (const field of DESCRIPTION_METAFIELDS) {
     const value = fields[field.key]?.trim();
-    if (!value) continue;
+    if (!isSetMetafieldValue(value)) continue;
     const suffix = "suffix" in field ? field.suffix : "";
-    parts.push(`• ${field.label}: ${value}${suffix}`);
+    lines.push(`• ${field.label}: ${value}${suffix}`);
   }
 
-  return `${HIDDEN_MARKER}${parts.join("")}</div>`;
+  return lines;
+}
+
+function buildHiddenRecordBlock(fields: VinylMetafields): string {
+  const lines = recordDetailLines(fields);
+  if (lines.length === 0) return "";
+  return `${HIDDEN_MARKER}### RECORD DETAILS${lines.join("")}</div>`;
 }
 
 /** Visible on storefront themes; hidden block stays in HTML for Shop channel. */
@@ -124,11 +145,12 @@ export function buildProductDescriptionHtml(
 ): string | null {
   const cleaned = stripHiddenRecordBlock(currentDescriptionHtml);
 
-  if (!hasSelectedDetails(selectedFields)) {
+  const hiddenBlock = buildHiddenRecordBlock(selectedFields);
+  if (!hiddenBlock) {
     return cleaned === currentDescriptionHtml.trim() ? null : cleaned;
   }
 
-  const next = `${cleaned}${buildHiddenRecordBlock(selectedFields)}`;
+  const next = `${cleaned}${hiddenBlock}`;
   return next === currentDescriptionHtml.trim() ? null : next;
 }
 
