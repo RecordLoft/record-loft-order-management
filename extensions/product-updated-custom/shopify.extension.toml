@@ -3,7 +3,7 @@ api_version = "2025-10"
 [[extensions]]
 name = "Product updated (custom)"
 type = "flow_trigger"
-handle = "product_updated_custom"
+handle = "product-updated-custom"
 description = "Runs when a product is created or updated in your store."
 
 [settings]
