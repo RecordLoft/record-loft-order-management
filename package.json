@@ -17,7 +17,8 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
-    "typecheck": "react-router typegen && tsc --noEmit"
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "backfill:descriptions": "prisma generate && tsx scripts/backfill-product-descriptions.ts"
   },
   "type": "module",
   "engines": {
@@ -62,6 +63,7 @@
     "eslint-plugin-react-hooks": "^4.6.2",
     "graphql-config": "^5.1.1",
     "prettier": "^3.8.3",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^6.3.6"
   },

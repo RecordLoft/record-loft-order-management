@@ -198,3 +198,119 @@ export async function fetchProductWithAllMetafields(
 
   return { descriptionHtml, metafields: allMetafields };
 }
+
+export const PRODUCT_UPDATE_MUTATION = `#graphql
+  mutation UpdateProductDescription($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export type GraphqlRequest = (
+  query: string,
+  options?: { variables?: Record<string, unknown> },
+) => Promise<Response>;
+
+export type DescriptionSyncResult = "updated" | "skipped" | "error";
+
+/** Fetch all metafields, rebuild descriptionHtml, update when changed. */
+export async function syncProductDescription(
+  graphql: GraphqlRequest,
+  productGid: string,
+  options?: { dryRun?: boolean },
+): Promise<DescriptionSyncResult> {
+  const productData = await fetchProductWithAllMetafields(graphql, productGid);
+  if (!productData) return "error";
+
+  const selectedFields = selectedMetafieldsFromAll(productData.metafields);
+  const nextDescription = buildProductDescriptionHtml(
+    productData.descriptionHtml ?? "",
+    selectedFields,
+  );
+
+  if (nextDescription === null) return "skipped";
+
+  if (options?.dryRun) return "updated";
+
+  const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
+    variables: {
+      input: {
+        id: productGid,
+        descriptionHtml: nextDescription,
+      },
+    },
+  });
+
+  const updateJson = (await updateResponse.json()) as {
+    data?: {
+      productUpdate?: {
+        userErrors: { field: string[]; message: string }[];
+      };
+    };
+    errors?: unknown;
+  };
+
+  if (updateJson.errors) return "error";
+
+  const userErrors = updateJson.data?.productUpdate?.userErrors ?? [];
+  if (userErrors.length > 0) return "error";
+
+  return "updated";
+}
+
+export const PRODUCTS_LIST_QUERY = `#graphql
+  query ProductsListPage($cursor: String) {
+    products(first: 50, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        title
+      }
+    }
+  }
+`;
+
+export async function listAllProductGids(
+  graphql: GraphqlRequest,
+): Promise<{ id: string; title: string }[]> {
+  const products: { id: string; title: string }[] = [];
+  let cursor: string | null = null;
+
+  do {
+    const response = await graphql(PRODUCTS_LIST_QUERY, {
+      variables: { cursor },
+    });
+    const json = (await response.json()) as {
+      data?: {
+        products: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: { id: string; title: string }[];
+        };
+      };
+      errors?: unknown;
+    };
+
+    if (json.errors || !json.data?.products) {
+      throw new Error(
+        `Failed to list products: ${JSON.stringify(json.errors)}`,
+      );
+    }
+
+    products.push(...json.data.products.nodes);
+    cursor = json.data.products.pageInfo.hasNextPage
+      ? json.data.products.pageInfo.endCursor
+      : null;
+  } while (cursor);
+
+  return products;
+}
