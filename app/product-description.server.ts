@@ -25,6 +25,8 @@ export type ProductMetafield = {
   namespace: string;
   key: string;
   value: string;
+  referenceDisplayName?: string | null;
+  referenceDisplayNames?: string[];
 };
 
 export function metafieldLookupKey(namespace: string, key: string): string {
@@ -72,6 +74,136 @@ export function parseMetafieldValue(raw: string): string {
   return trimmed;
 }
 
+function isUnresolvedGid(value: string): boolean {
+  return value.startsWith("gid://");
+}
+
+/** Prefer resolved metaobject/taxonomy labels over raw GID values. */
+export function displayMetafieldValue(node: ProductMetafield): string {
+  const fromReferences =
+    node.referenceDisplayNames?.filter(isSetMetafieldValue);
+  if (fromReferences?.length) return fromReferences.join(", ");
+
+  if (isSetMetafieldValue(node.referenceDisplayName)) {
+    return node.referenceDisplayName;
+  }
+
+  const parsed = parseMetafieldValue(node.value);
+  if (!parsed) return "";
+
+  const parts = parsed
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length > 0 && parts.every(isUnresolvedGid)) return "";
+
+  const labels = parts.filter((part) => !isUnresolvedGid(part));
+  return labels.length > 0 ? labels.join(", ") : parsed;
+}
+
+function gidsInMetafieldValue(raw: string): string[] {
+  const trimmed = raw.trim();
+  const gids: string[] = [];
+
+  if (isUnresolvedGid(trimmed)) {
+    gids.push(trimmed);
+    return gids;
+  }
+
+  if (!trimmed.startsWith("[")) return gids;
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!Array.isArray(parsed)) return gids;
+    for (const item of parsed) {
+      const gid = String(item ?? "").trim();
+      if (isUnresolvedGid(gid)) gids.push(gid);
+    }
+  } catch {
+    // ignore
+  }
+
+  return gids;
+}
+
+export const METAOBJECT_DISPLAY_NAMES_QUERY = `#graphql
+  query MetaobjectDisplayNames($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Metaobject {
+        id
+        displayName
+      }
+    }
+  }
+`;
+
+async function resolveMetaobjectDisplayNames(
+  graphql: GraphqlRequest,
+  gids: string[],
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (gids.length === 0) return names;
+
+  const response = await graphql(METAOBJECT_DISPLAY_NAMES_QUERY, {
+    variables: { ids: gids },
+  });
+  const json = (await response.json()) as {
+    data?: {
+      nodes: ({ id?: string; displayName?: string | null } | null)[];
+    };
+    errors?: unknown;
+  };
+
+  for (const node of json.data?.nodes ?? []) {
+    if (node?.id && isSetMetafieldValue(node.displayName)) {
+      names.set(node.id, node.displayName);
+    }
+  }
+
+  return names;
+}
+
+async function enrichMetafieldsWithMetaobjectNames(
+  graphql: GraphqlRequest,
+  metafields: ProductMetafield[],
+): Promise<ProductMetafield[]> {
+  const gids = [
+    ...new Set(
+      metafields.flatMap((node) => {
+        if (displayMetafieldValue(node)) return [];
+        return gidsInMetafieldValue(node.value);
+      }),
+    ),
+  ];
+
+  if (gids.length === 0) return metafields;
+
+  const names = await resolveMetaobjectDisplayNames(graphql, gids);
+
+  return metafields.map((node) => {
+    if (displayMetafieldValue(node)) return node;
+
+    const nodeGids = gidsInMetafieldValue(node.value);
+    const resolved = nodeGids
+      .map((gid) => names.get(gid))
+      .filter(isSetMetafieldValue);
+    if (resolved.length === 0) return node;
+
+    return { ...node, referenceDisplayNames: resolved };
+  });
+}
+
+function formatFieldValue(
+  field: (typeof DESCRIPTION_METAFIELDS)[number],
+  value: string,
+): string {
+  const suffix = "suffix" in field ? field.suffix : "";
+  if (!suffix) return value;
+
+  if (/rpm/i.test(value)) return value;
+  return `${value}${suffix}`;
+}
+
 /** Index every metafield on the product; only selected keys are returned for rendering. */
 export function indexAllMetafields(
   nodes: ProductMetafield[],
@@ -81,7 +213,7 @@ export function indexAllMetafields(
   for (const node of nodes) {
     index.set(
       metafieldLookupKey(node.namespace, node.key),
-      parseMetafieldValue(node.value),
+      displayMetafieldValue(node),
     );
   }
 
@@ -127,8 +259,7 @@ function recordDetailLines(fields: VinylMetafields): string[] {
   for (const field of DESCRIPTION_METAFIELDS) {
     const value = fields[field.key]?.trim();
     if (!isSetMetafieldValue(value)) continue;
-    const suffix = "suffix" in field ? field.suffix : "";
-    lines.push(`• ${field.label}: ${value}${suffix}`);
+    lines.push(`• ${field.label}: ${formatFieldValue(field, value)}`);
   }
 
   return lines;
@@ -137,7 +268,7 @@ function recordDetailLines(fields: VinylMetafields): string[] {
 function buildHiddenRecordBlock(fields: VinylMetafields): string {
   const lines = recordDetailLines(fields);
   if (lines.length === 0) return "";
-  return `${HIDDEN_MARKER}DETAILS:\n${lines.join("\n")}</div>`;
+  return `${HIDDEN_MARKER}<strong>DETAILS:</strong><br />${lines.join("<br />")}</div>`;
 }
 
 /** Visible on storefront themes; hidden block stays in HTML for Shop channel. */
@@ -170,11 +301,43 @@ export const PRODUCT_METAFIELDS_QUERY = `#graphql
           namespace
           key
           value
+          reference {
+            ... on Metaobject {
+              displayName
+            }
+          }
+          references(first: 20) {
+            nodes {
+              ... on Metaobject {
+                displayName
+              }
+            }
+          }
         }
       }
     }
   }
 `;
+
+type MetafieldGraphNode = {
+  namespace: string;
+  key: string;
+  value: string;
+  reference?: { displayName?: string | null } | null;
+  references?: { nodes: { displayName?: string | null }[] };
+};
+
+function metafieldFromGraphNode(node: MetafieldGraphNode): ProductMetafield {
+  return {
+    namespace: node.namespace,
+    key: node.key,
+    value: node.value,
+    referenceDisplayName: node.reference?.displayName ?? null,
+    referenceDisplayNames: node.references?.nodes
+      .map((ref) => ref.displayName)
+      .filter(isSetMetafieldValue),
+  };
+}
 
 type MetafieldsPage = {
   product: {
@@ -182,7 +345,7 @@ type MetafieldsPage = {
     descriptionHtml: string;
     metafields: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      nodes: ProductMetafield[];
+      nodes: MetafieldGraphNode[];
     };
   } | null;
 };
@@ -213,14 +376,19 @@ export async function fetchProductWithAllMetafields(
 
     const product = json.data.product;
     descriptionHtml = product.descriptionHtml ?? "";
-    allMetafields.push(...product.metafields.nodes);
+    allMetafields.push(...product.metafields.nodes.map(metafieldFromGraphNode));
 
     cursor = product.metafields.pageInfo.hasNextPage
       ? product.metafields.pageInfo.endCursor
       : null;
   } while (cursor);
 
-  return { descriptionHtml, metafields: allMetafields };
+  const metafields = await enrichMetafieldsWithMetaobjectNames(
+    graphql,
+    allMetafields,
+  );
+
+  return { descriptionHtml, metafields };
 }
 
 export const PRODUCT_UPDATE_MUTATION = `#graphql
