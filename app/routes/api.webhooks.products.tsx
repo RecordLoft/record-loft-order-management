@@ -8,13 +8,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response("Account reference error", { status: 400 });
   }
 
-  if (topic === "PRODUCTS_UPDATE") {
+  if (topic === "PRODUCTS_UPDATE" || topic === "PRODUCTS_CREATE") {
     try {
       const graphqlProductId = `gid://shopify/Product/${payload.id}`;
-      console.log(`📦 Processing update webhook for product: ${graphqlProductId}`);
+      console.log(`📦 Processing ${topic} event for product: ${graphqlProductId}`);
 
-      // FIX: Changed variable schema mapping from MetadataInput! to untyped JSON! 
-      // to let the dynamically generated string bypass strict payload definitions.
       const response = await admin.graphql(`
         mutation runFlowTrigger($handle: String!, $triggerData: JSON!) {
           flowTriggerReceive(handle: $handle, triggerData: $triggerData) {
@@ -33,7 +31,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       });
 
-      const result = await response.json() as any; // <-- Cast this as any
+      const result = await response.json() as any;
 
       if (result.errors) {
         console.error("❌ GraphQL Syntax/Schema Errors:", JSON.stringify(result.errors, null, 2));
@@ -43,7 +41,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (userErrors && userErrors.length > 0) {
         console.error("❌ Flow Engine Rejection Errors:", userErrors);
       } else if (!result.errors) {
-        console.log("🚀 Success! Sent update event to Shopify Flow.");
+        console.log(`🚀 Success! Forwarded ${topic} straight down to Shopify Flow.`);
       }
 
     } catch (error) {
