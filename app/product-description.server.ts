@@ -410,7 +410,10 @@ export type GraphqlRequest = (
   options?: { variables?: Record<string, unknown> },
 ) => Promise<Response>;
 
-export type DescriptionSyncResult = "updated" | "skipped" | "error";
+export type DescriptionSyncResult =
+  | { outcome: "updated" }
+  | { outcome: "skipped" }
+  | { outcome: "error"; message: string; code?: string };
 
 /** Fetch all metafields, rebuild descriptionHtml, update when changed. */
 export async function syncProductDescription(
@@ -419,7 +422,13 @@ export async function syncProductDescription(
   options?: { dryRun?: boolean },
 ): Promise<DescriptionSyncResult> {
   const productData = await fetchProductWithAllMetafields(graphql, productGid);
-  if (!productData) return "error";
+  if (!productData) {
+    return {
+      outcome: "error",
+      code: "product_not_found",
+      message: `Product ${productGid} not found or metafields could not be loaded`,
+    };
+  }
 
   const selectedFields = selectedMetafieldsFromAll(productData.metafields);
   const nextDescription = buildProductDescriptionHtml(
@@ -427,9 +436,9 @@ export async function syncProductDescription(
     selectedFields,
   );
 
-  if (nextDescription === null) return "skipped";
+  if (nextDescription === null) return { outcome: "skipped" };
 
-  if (options?.dryRun) return "updated";
+  if (options?.dryRun) return { outcome: "updated" };
 
   const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
     variables: {
@@ -449,12 +458,24 @@ export async function syncProductDescription(
     errors?: unknown;
   };
 
-  if (updateJson.errors) return "error";
+  if (updateJson.errors) {
+    return {
+      outcome: "error",
+      code: "graphql_errors",
+      message: JSON.stringify(updateJson.errors),
+    };
+  }
 
   const userErrors = updateJson.data?.productUpdate?.userErrors ?? [];
-  if (userErrors.length > 0) return "error";
+  if (userErrors.length > 0) {
+    return {
+      outcome: "error",
+      code: "user_errors",
+      message: userErrors.map((e) => e.message).join("; "),
+    };
+  }
 
-  return "updated";
+  return { outcome: "updated" };
 }
 
 export const PRODUCTS_LIST_QUERY = `#graphql

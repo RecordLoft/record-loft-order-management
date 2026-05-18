@@ -1,17 +1,7 @@
-/**
- * Backfill product descriptionHtml for all products in a shop.
- *
- *   SHOP=your-store.myshopify.com yarn backfill:descriptions
- *   SHOP=your-store.myshopify.com yarn backfill:descriptions -- --dry-run
- *   SHOP=your-store.myshopify.com yarn backfill:descriptions -- --limit 10
- *
- * Requires in .env: DATABASE_URL, SHOPIFY_API_KEY, SHOPIFY_API_SECRET
- * Optional: SHOPIFY_APP_URL (host name for API client)
- */
-import "@shopify/shopify-api/adapters/node";
-import { ApiVersion, shopifyApi, type Session } from "@shopify/shopify-api";
 import { neonConfig } from "@neondatabase/serverless";
 import { PrismaNeon } from "@prisma/adapter-neon";
+import { ApiVersion, shopifyApi, type Session } from "@shopify/shopify-api";
+import "@shopify/shopify-api/adapters/node";
 import "dotenv/config";
 import ws from "ws";
 import {
@@ -19,8 +9,8 @@ import {
   syncProductDescription,
   type GraphqlRequest,
 } from "../app/product-description.server";
-import { PrismaClient } from "../generated/prisma/client";
 import { PrismaSessionStorage } from "../app/shopify-app-session-storage-prisma.js";
+import { PrismaClient } from "../generated/prisma/client";
 
 neonConfig.webSocketConstructor = ws;
 
@@ -61,7 +51,9 @@ async function main() {
   const apiSecretKey = requireEnv("SHOPIFY_API_SECRET");
   const { dryRun, limit, delayMs } = parseArgs(process.argv.slice(2));
 
-  const adapter = new PrismaNeon({ connectionString: requireEnv("DATABASE_URL") });
+  const adapter = new PrismaNeon({
+    connectionString: requireEnv("DATABASE_URL"),
+  });
   const prisma = new PrismaClient({ adapter });
   const sessionStorage = new PrismaSessionStorage(prisma);
 
@@ -105,7 +97,9 @@ async function main() {
   const products = await listAllProductGids(graphql);
   const targets = limit ? products.slice(0, limit) : products;
 
-  console.log(`Found ${products.length} product(s); processing ${targets.length}…\n`);
+  console.log(
+    `Found ${products.length} product(s); processing ${targets.length}…\n`,
+  );
 
   let updated = 0;
   let skipped = 0;
@@ -117,17 +111,21 @@ async function main() {
     });
 
     const label = product.title || product.id;
-    if (result === "updated") {
+    if (result.outcome === "updated") {
       updated += 1;
       console.log(
         `[${index + 1}/${targets.length}] ${dryRun ? "Would update" : "Updated"}: ${label}`,
       );
-    } else if (result === "skipped") {
+    } else if (result.outcome === "skipped") {
       skipped += 1;
-      console.log(`[${index + 1}/${targets.length}] Skipped (up to date): ${label}`);
+      console.log(
+        `[${index + 1}/${targets.length}] Skipped (up to date): ${label}`,
+      );
     } else {
       errors += 1;
-      console.log(`[${index + 1}/${targets.length}] Error: ${label}`);
+      console.log(
+        `[${index + 1}/${targets.length}] Error: ${label} — ${result.message}`,
+      );
     }
 
     if (delayMs > 0 && index < targets.length - 1) {

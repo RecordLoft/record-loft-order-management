@@ -69,3 +69,42 @@ model Customer {
   lastName  String?
   orders    Order[]
 }
+
+enum WebhookJobStatus {
+  pending
+  processing
+  completed
+  skipped
+  failed
+}
+
+enum WebhookJobHandler {
+  product_description_sync
+  orders_create
+}
+
+/// Queue for async webhook processing (products, orders, etc.).
+model WebhookJob {
+  id              String            @id @default(cuid())
+  shop            String
+  handler         WebhookJobHandler
+  topic           String
+  resourceId      BigInt
+  resourceGid     String?
+  webhookId       String?
+  payload         Json
+  status          WebhookJobStatus  @default(pending)
+  outcome         String?
+  errorCode       String?
+  errorMessage    String?           @db.Text
+  attempts        Int               @default(0)
+  maxAttempts     Int               @default(5)
+  lastAttemptAt   DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([shop, handler, resourceId])
+  @@index([status, createdAt])
+  @@index([shop, handler, status])
+}

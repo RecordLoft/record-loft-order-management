@@ -1,10 +1,17 @@
-import type { ActionFunctionArgs } from "react-router";
-import { syncProductDescription } from "../product-description.server";
+import {
+  WEBHOOK_HANDLERS,
+  enqueueWebhookJob,
+  enqueueWebhookJobNoSession,
+  scheduleImmediateWebhookJobProcessing,
+} from "../webhook-queue.server";
 import { authenticate } from "../shopify.server";
+import type { Route } from "./+types/api.webhooks.products";
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+export const action = async ({ request, context }: Route.ActionArgs) => {
   const { topic, shop, session, admin, payload } =
     await authenticate.webhook(request);
+
+  const webhookId = request.headers.get("x-shopify-webhook-id");
 
   console.log(
     `[products-webhook] ${topic} shop=${shop} session=${session ? "yes" : "no"} admin=${admin ? "yes" : "no"}`,
@@ -14,37 +21,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response("Webhook handled", { status: 200 });
   }
 
+  const productId = payload.id as number;
+  const enqueueInput = {
+    shop,
+    handler: WEBHOOK_HANDLERS.PRODUCT_DESCRIPTION_SYNC,
+    topic,
+    resourceId: productId,
+    resourceGid: `gid://shopify/Product/${productId}`,
+    webhookId,
+    payload,
+  };
+
   if (!admin) {
     console.error(
       `[products-webhook] No admin API context for ${shop}. ` +
         "Open the app once on this store so an offline session exists.",
     );
+    await enqueueWebhookJobNoSession(enqueueInput);
     return new Response("No session for shop", { status: 200 });
   }
 
-  try {
-    const productGid = `gid://shopify/Product/${payload.id}`;
-    const result = await syncProductDescription(
-      admin.graphql.bind(admin),
-      productGid,
-    );
+  const job = await enqueueWebhookJob(enqueueInput);
+  const graphql = admin.graphql.bind(admin);
 
-    if (result === "updated") {
-      console.log(
-        `[products-webhook] Updated descriptionHtml for product ${payload.id}`,
-      );
-    } else if (result === "skipped") {
-      console.log(
-        `[products-webhook] Skipping product ${payload.id} — description already up to date`,
-      );
-    } else {
-      console.error(
-        `[products-webhook] Failed to sync description for product ${payload.id}`,
-      );
-    }
-  } catch (error) {
-    console.error("[products-webhook] Handler error:", error);
-  }
+  // 200 first; same invocation continues work via waitUntil (not a second function).
+  const response = new Response("Webhook handled", { status: 200 });
+  scheduleImmediateWebhookJobProcessing(context, job.id, graphql);
 
-  return new Response("Webhook handled", { status: 200 });
+  console.log(`[products-webhook] Enqueued job ${job.id} for product ${productId}`);
+
+  return response;
 };
