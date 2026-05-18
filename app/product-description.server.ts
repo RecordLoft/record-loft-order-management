@@ -3,7 +3,7 @@ const HIDDEN_MARKER = '<div style="display: none !important;">';
 /** Metafields to include in the hidden Shop-channel block (order preserved). */
 export const DESCRIPTION_METAFIELDS = [
   { namespace: "vinyl", key: "artist", label: "Artist" },
-  { namespace: "vinyl", key: "music_genre", label: "Genre" },
+  { namespace: "shopify", key: "music-genre", label: "Genre" },
   { namespace: "vinyl", key: "format", label: "Format" },
   { namespace: "vinyl", key: "speed", label: "Speed", suffix: " RPM" },
   { namespace: "vinyl", key: "vinyl_grade", label: "Vinyl Grade" },
@@ -98,7 +98,9 @@ export function selectedMetafieldsFromAll(
   ) as VinylMetafields;
 
   for (const field of DESCRIPTION_METAFIELDS) {
-    const value = index.get(metafieldLookupKey(field.namespace, field.key))?.trim();
+    const value = index
+      .get(metafieldLookupKey(field.namespace, field.key))
+      ?.trim();
     if (isSetMetafieldValue(value)) fields[field.key] = value;
   }
 
@@ -135,7 +137,7 @@ function recordDetailLines(fields: VinylMetafields): string[] {
 function buildHiddenRecordBlock(fields: VinylMetafields): string {
   const lines = recordDetailLines(fields);
   if (lines.length === 0) return "";
-  return `${HIDDEN_MARKER}### RECORD DETAILS${lines.join("")}</div>`;
+  return `${HIDDEN_MARKER}DETAILS:\n${lines.join("\n")}</div>`;
 }
 
 /** Visible on storefront themes; hidden block stays in HTML for Shop channel. */
