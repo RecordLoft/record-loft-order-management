@@ -1,52 +1,79 @@
-import { ActionFunctionArgs } from "@remix-run/node";
+import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { topic, admin, payload } = await authenticate.webhook(request);
+const FLOW_TRIGGER_HANDLE = "product_updated_custom";
 
-  if (!admin) {
-    return new Response("Account reference error", { status: 400 });
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { topic, shop, session, admin, payload } =
+    await authenticate.webhook(request);
+
+  console.log(
+    `[products-webhook] ${topic} shop=${shop} session=${session ? "yes" : "no"} admin=${admin ? "yes" : "no"}`,
+  );
+
+  if (topic !== "PRODUCTS_CREATE" && topic !== "PRODUCTS_UPDATE") {
+    return new Response("Webhook handled", { status: 200 });
   }
 
-  if (topic === "PRODUCTS_UPDATE" || topic === "PRODUCTS_CREATE") {
-    try {
-      const graphqlProductId = `gid://shopify/Product/${payload.id}`;
-      console.log(`📦 Processing ${topic} event for product: ${graphqlProductId}`);
+  if (!admin) {
+    console.error(
+      `[products-webhook] No admin API context for ${shop}. ` +
+      "Open the app once on this store (or re-install) so an offline session exists.",
+    );
+    return new Response("No session for shop", { status: 200 });
+  }
 
-      const response = await admin.graphql(`
-        mutation runFlowTrigger($handle: String!, $triggerData: JSON!) {
-          flowTriggerReceive(handle: $handle, triggerData: $triggerData) {
+  try {
+    const graphqlProductId = `gid://shopify/Product/${payload.id}`;
+    console.log(
+      `[products-webhook] Forwarding ${topic} for ${graphqlProductId} → Flow (${FLOW_TRIGGER_HANDLE})`,
+    );
+
+    const response = await admin.graphql(
+      `#graphql
+        mutation runFlowTrigger($handle: String!, $payload: JSON!) {
+          flowTriggerReceive(handle: $handle, payload: $payload) {
             userErrors {
               field
               message
             }
           }
         }
-      `, {
+      `,
+      {
         variables: {
-          handle: "product_updated_custom",
-          triggerData: {
-            "product_id": graphqlProductId
-          }
-        }
-      });
+          handle: FLOW_TRIGGER_HANDLE,
+          payload: {
+            product_id: graphqlProductId,
+          },
+        },
+      },
+    );
 
-      const result = await response.json() as any;
+    const result = (await response.json()) as {
+      errors?: unknown;
+      data?: {
+        flowTriggerReceive?: {
+          userErrors?: { field: string[]; message: string }[];
+        };
+      };
+    };
 
-      if (result.errors) {
-        console.error("❌ GraphQL Syntax/Schema Errors:", JSON.stringify(result.errors, null, 2));
-      }
-
-      const userErrors = result.data?.flowTriggerReceive?.userErrors;
-      if (userErrors && userErrors.length > 0) {
-        console.error("❌ Flow Engine Rejection Errors:", userErrors);
-      } else if (!result.errors) {
-        console.log(`🚀 Success! Forwarded ${topic} straight down to Shopify Flow.`);
-      }
-
-    } catch (error) {
-      console.error("❌ Webhook processing exploded:", error);
+    if (result.errors) {
+      console.error(
+        "[products-webhook] GraphQL errors:",
+        JSON.stringify(result.errors, null, 2),
+      );
     }
+
+    const userErrors = result.data?.flowTriggerReceive?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      console.error("[products-webhook] Flow userErrors:", userErrors);
+    } else if (!result.errors) {
+      console.log(`[products-webhook] Flow trigger sent for ${graphqlProductId}`);
+    }
+  } catch (error) {
+    console.error("[products-webhook] Handler error:", error);
   }
 
   return new Response("Webhook handled", { status: 200 });

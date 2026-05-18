@@ -20,6 +20,18 @@ api_version = "2026-07"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
+  [[webhooks.subscriptions]]
+  uri = "/api/webhooks/orders"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/api/webhooks/products"
+  topics = [ "products/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/api/webhooks/products"
+  topics = [ "products/update" ]
+
 [auth]
 redirect_urls = [
   "https://record-loft-order-management.netlify.app/auth/callback",
