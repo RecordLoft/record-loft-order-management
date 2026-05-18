@@ -7,7 +7,7 @@ embedded = true
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products, read_orders, read_customers, read_fulfillments, read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders, read_assigned_fulfillment_orders, read_third_party_fulfillment_orders"
+scopes = "read_products, write_products, read_orders, read_customers, read_fulfillments, read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders, read_assigned_fulfillment_orders, read_third_party_fulfillment_orders"
 
 [webhooks]
 api_version = "2026-07"
@@ -41,14 +41,3 @@ redirect_urls = [
 
 [build]
 automatically_update_urls_on_dev = true
-
-[[extensions]]
-name = "Product Updated (Custom App)"
-type = "flow_trigger"
-handle = "product_updated_custom"
-description = "Fires every time a product structure or metafield is updated in the store."
-
-  [[extensions.settings.fields]]
-  key = "product_id"
-  type = "single_line_text_field"
-  description = "The GraphQL global ID of the modified product identity."
