@@ -48,7 +48,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     await bulkUpdateOrderStatus(orderIds, statusCode);
-    return { success: true };
+    return Response.json({ success: true });
   } catch (error: unknown) {
     if (error instanceof RateLimitError) {
       return Response.json(

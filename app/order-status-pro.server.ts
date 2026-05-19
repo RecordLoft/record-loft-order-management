@@ -70,19 +70,32 @@ function parseWebhookStatusName(value: unknown): string | null {
   return newLabel.trim();
 }
 
-/** GET /statuses — same options for every Record Planet order. */
-export async function fetchStatusChoices(): Promise<StatusChoice[]> {
-  const response = await fetchOrderStatusPro("/statuses");
+/**
+ * GET /orders/{id}/viable-statuses — statuses allowed for this order's tags
+ * (Record Planet Shipping on Record Planet orders).
+ */
+export async function fetchViableStatusChoices(
+  orderId: bigint,
+): Promise<StatusChoice[]> {
+  const response = await fetchOrderStatusPro(
+    `/orders/${orderId}/viable-statuses`,
+  );
   if (!response.ok) {
     const errorText = await response.text();
     console.error(
-      `OrderStatusPro statuses error: ${response.status} - ${errorText}`,
+      `OrderStatusPro viable-statuses error: ${response.status} - ${errorText}`,
     );
-    throw new Error("Failed to fetch statuses from Order Status Pro");
+    throw new Error("Failed to fetch viable statuses from Order Status Pro");
   }
   const data = await response.json();
   const statuses: StatusOption[] = Array.isArray(data) ? data : [];
   return toStatusChoices(statuses);
+}
+
+export function parseOrderIdParam(value: string | null): bigint | null {
+  if (!value?.trim()) return null;
+  const segment = value.trim().split("/").pop() || value.trim();
+  return parseOrderId(segment);
 }
 
 export function orderStatusFromRow(order: {
@@ -94,7 +107,55 @@ export function orderStatusFromRow(order: {
   return "Unknown";
 }
 
-/** Webhook-only cache: StatusPro sends `status.new_status` as a display name. */
+const statusWatchers = new Map<string, Set<(statusName: string) => void>>();
+
+export function subscribeOrderStatusWatch(
+  orderId: bigint,
+  onUpdate: (statusName: string) => void,
+): () => void {
+  const key = orderId.toString();
+  let listeners = statusWatchers.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    statusWatchers.set(key, listeners);
+  }
+  listeners.add(onUpdate);
+  return () => {
+    listeners!.delete(onUpdate);
+    if (listeners!.size === 0) statusWatchers.delete(key);
+  };
+}
+
+function emitOrderStatusCacheUpdated(orderId: bigint, statusName: string) {
+  statusWatchers.get(orderId.toString())?.forEach((listener) => {
+    listener(statusName);
+  });
+}
+
+export function parseOrderIdsParam(value: string | null): bigint[] {
+  if (!value?.trim()) return [];
+  return value
+    .split(",")
+    .map((part) => parseOrderIdParam(part.trim()))
+    .filter((id): id is bigint => id !== null);
+}
+
+export async function ordersMatchCachedStatus(
+  orderIds: bigint[],
+  expectedStatusName: string,
+): Promise<boolean> {
+  if (orderIds.length === 0) return false;
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderIds } },
+    select: { ospStatusName: true },
+  });
+  return (
+    rows.length === orderIds.length &&
+    rows.every((row) => row.ospStatusName === expectedStatusName)
+  );
+}
+
+/** Cache display name from StatusPro webhook. */
 export async function applyOrderStatusCache(
   orderId: bigint,
   statusName: string,
@@ -106,6 +167,9 @@ export async function applyOrderStatusCache(
       ospStatusSyncedAt: new Date(),
     },
   });
+  if (result.count > 0) {
+    emitOrderStatusCacheUpdated(orderId, statusName);
+  }
   return result.count > 0;
 }
 

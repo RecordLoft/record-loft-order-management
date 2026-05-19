@@ -29,23 +29,45 @@ export function StatusUpdateModal({
 	const [statusChoices, setStatusChoices] = useState<StatusChoice[]>([]);
 	const [isLoadingChoices, setIsLoadingChoices] = useState(false);
 	const [choicesError, setChoicesError] = useState<string | null>(null);
-	const choicesFetched = useRef(false);
+	const [isWaitingForWebhook, setIsWaitingForWebhook] = useState(false);
+	const [syncError, setSyncError] = useState<string | null>(null);
+	const choicesFetchedForOrder = useRef<string | null>(null);
+	const eventSourceRef = useRef<EventSource | null>(null);
+	const pendingSyncRef = useRef<{ ids: string[]; statusName: string } | null>(
+		null,
+	);
+	const handledSuccessRef = useRef(false);
 
 	const isOverLimit = selectedIds.length > 50;
+	const representativeOrderId = selectedIds[0] ?? null;
+
+	const closeEventSource = useCallback(() => {
+		eventSourceRef.current?.close();
+		eventSourceRef.current = null;
+	}, []);
 
 	useEffect(() => {
 		if (!open) {
 			setNewStatus([]);
+			setIsWaitingForWebhook(false);
+			setSyncError(null);
+			pendingSyncRef.current = null;
+			handledSuccessRef.current = false;
+			choicesFetchedForOrder.current = null;
+			closeEventSource();
 			return;
 		}
 
-		if (choicesFetched.current || isOverLimit) return;
+		if (!representativeOrderId || isOverLimit) return;
+		if (choicesFetchedForOrder.current === representativeOrderId) return;
 
-		choicesFetched.current = true;
+		choicesFetchedForOrder.current = representativeOrderId;
 		setIsLoadingChoices(true);
 		setChoicesError(null);
 
-		fetch("/api/viable-statuses")
+		fetch(
+			`/api/viable-statuses?id=${encodeURIComponent(representativeOrderId)}`,
+		)
 			.then(async (res) => {
 				const data = await res.json();
 				if (!res.ok) {
@@ -59,38 +81,105 @@ export function StatusUpdateModal({
 				setStatusChoices(data);
 			})
 			.catch((error: unknown) => {
-				choicesFetched.current = false;
+				choicesFetchedForOrder.current = null;
 				setChoicesError(
 					error instanceof Error ? error.message : "Could not load statuses",
 				);
 			})
 			.finally(() => setIsLoadingChoices(false));
-	}, [open, isOverLimit]);
+	}, [open, isOverLimit, representativeOrderId]);
 
 	const handleAction = useCallback(() => {
+		const statusCode = newStatus[0];
+		const statusLabel = statusChoices.find((s) => s.value === statusCode)?.label;
+		pendingSyncRef.current = {
+			ids: selectedIds,
+			statusName: statusLabel ?? statusCode,
+		};
+		handledSuccessRef.current = false;
+		setSyncError(null);
 		fetcher.submit(
 			{
 				ids: selectedIds.join(","),
-				status_code: newStatus[0],
+				status_code: statusCode,
 			},
 			{ method: "POST", action: "/api/update-status" },
 		);
-	}, [selectedIds, newStatus, fetcher]);
+	}, [selectedIds, newStatus, statusChoices, fetcher]);
 
 	useEffect(() => {
-		if (fetcher.state === "idle" && fetcher.data?.success) {
+		if (fetcher.state !== "idle" || !fetcher.data?.success) return;
+		if (handledSuccessRef.current) return;
+
+		const pending = pendingSyncRef.current;
+		if (!pending) return;
+
+		handledSuccessRef.current = true;
+
+		setIsWaitingForWebhook(true);
+		closeEventSource();
+
+		const params = new URLSearchParams({
+			ids: pending.ids.join(","),
+			status_name: pending.statusName,
+		});
+		const es = new EventSource(`/api/order-status-watch?${params}`);
+		eventSourceRef.current = es;
+
+		const finish = (error?: string) => {
+			closeEventSource();
+			pendingSyncRef.current = null;
+			setIsWaitingForWebhook(false);
+			if (error) {
+				setSyncError(error);
+				return;
+			}
 			setNewStatus([]);
 			onSuccess?.();
 			onClose();
-		}
-	}, [fetcher.state, fetcher.data, onClose, onSuccess]);
+		};
+
+		es.addEventListener("synced", () => finish());
+		es.addEventListener("timeout", (event) => {
+			try {
+				const data = JSON.parse((event as MessageEvent).data) as {
+					error?: string;
+				};
+				finish(data.error ?? "Status sync timed out.");
+			} catch {
+				finish("Status sync timed out.");
+			}
+		});
+		es.onerror = () => {
+			if (eventSourceRef.current === es) {
+				finish("Lost connection while waiting for status sync.");
+			}
+		};
+
+		return () => {
+			closeEventSource();
+		};
+	}, [
+		fetcher.state,
+		fetcher.data,
+		onClose,
+		onSuccess,
+		closeEventSource,
+	]);
+
+	const handleClose = useCallback(() => {
+		if (isWaitingForWebhook) return;
+		onClose();
+	}, [isWaitingForWebhook, onClose]);
 
 	const choicesReady = statusChoices.length > 0;
+	const isBusy =
+		fetcher.state !== "idle" || isWaitingForWebhook;
 
 	return (
 		<Modal
 			open={open}
-			onClose={onClose}
+			onClose={handleClose}
 			title={selectedIds.length > 1 ? `Bulk Update ${selectedIds.length} Orders` : "Update Order Status"}
 			primaryAction={{
 				content: "Update Status",
@@ -99,10 +188,17 @@ export function StatusUpdateModal({
 					newStatus.length === 0 ||
 					isOverLimit ||
 					isLoadingChoices ||
-					!choicesReady,
-				loading: fetcher.state !== "idle",
+					!choicesReady ||
+					isWaitingForWebhook,
+				loading: isBusy,
 			}}
-			secondaryActions={[{ content: "Cancel", onAction: onClose }]}
+			secondaryActions={[
+				{
+					content: "Cancel",
+					onAction: handleClose,
+					disabled: isWaitingForWebhook,
+				},
+			]}
 		>
 			<Modal.Section>
 				<BlockStack gap="400">
@@ -118,9 +214,21 @@ export function StatusUpdateModal({
 								</Banner>
 							)}
 
+							{isWaitingForWebhook && (
+								<Banner tone="info">
+									<p>Waiting for Order Status Pro to confirm the new status…</p>
+								</Banner>
+							)}
+
 							{fetcher.data?.error && (
 								<Banner tone="critical">
 									<p>{fetcher.data.error}</p>
+								</Banner>
+							)}
+
+							{syncError && (
+								<Banner tone="critical">
+									<p>{syncError}</p>
 								</Banner>
 							)}
 
@@ -145,6 +253,7 @@ export function StatusUpdateModal({
 										choices={statusChoices}
 										selected={newStatus}
 										onChange={(value) => setNewStatus(value)}
+										disabled={isWaitingForWebhook}
 									/>
 								)
 							)}
