@@ -87,6 +87,19 @@ function firstParsedStatus(...candidates: unknown[]): OspOrderStatus | null {
 function parseStatusChangeBlock(value: unknown): OspOrderStatus | null {
   if (!value || typeof value !== "object") return null;
   const block = value as Record<string, unknown>;
+
+  // StatusPro webhook: { status: { previous_status: "…", new_status: "…" } }
+  const newLabel =
+    block.new_status ??
+    block.newStatus ??
+    block.new ??
+    block.to ??
+    block.after ??
+    block.current;
+  if (typeof newLabel === "string" && newLabel.trim()) {
+    return { name: newLabel.trim() };
+  }
+
   return firstParsedStatus(
     block.to,
     block.new,
@@ -192,20 +205,10 @@ export function parseOspWebhookPayload(
   if (orderId == null) return null;
 
   const status =
+    parseStatusChangeBlock(record.status) ??
+    parseStatusChangeBlock(record.status_change) ??
     parseStatusFromOrder(nestedOrder ?? {}) ??
-    firstParsedStatus(
-      record.status,
-      record.new_status,
-      record.newStatus,
-      record.to_status,
-      record.toStatus,
-      record.current_status,
-      record.order_status,
-      record.after,
-      parseStatusChangeBlock(record.status_change),
-      nestedData?.status,
-      nestedData?.new_status,
-    );
+    firstParsedStatus(nestedData?.status, nestedData?.new_status);
 
   if (!status) return null;
 
