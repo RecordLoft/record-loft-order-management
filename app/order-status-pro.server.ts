@@ -35,11 +35,6 @@ async function waitForRateLimitSlot(): Promise<void> {
   requestTimestamps.push(Date.now());
 }
 
-export type OspOrderStatus = {
-  code?: string;
-  name?: string;
-};
-
 export type StatusChoice = { label: string; value: string };
 
 type StatusOption = { name?: string; code?: string };
@@ -51,74 +46,6 @@ function toStatusChoices(statuses: StatusOption[]): StatusChoice[] {
       label: status.name!,
       value: status.code!,
     }));
-}
-
-/** StatusPro custom status objects include `code` (e.g. st0005RI) and often `is_set`. */
-function isOspStatusObject(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (record.is_set === true) return true;
-  if (typeof record.code === "string" && /^st[a-zA-Z0-9]+$/i.test(record.code)) {
-    return true;
-  }
-  return false;
-}
-
-function parseStatusObject(status: unknown): OspOrderStatus | null {
-  if (!isOspStatusObject(status)) return null;
-  const record = status;
-  const code =
-    typeof record.code === "string" ? record.code : undefined;
-  const name =
-    (typeof record.name === "string" ? record.name : undefined) ??
-    (typeof record.public_name === "string" ? record.public_name : undefined);
-  if (!code && !name) return null;
-  return { code, name };
-}
-
-function firstParsedStatus(...candidates: unknown[]): OspOrderStatus | null {
-  for (const candidate of candidates) {
-    const parsed = parseStatusObject(candidate);
-    if (parsed) return parsed;
-  }
-  return null;
-}
-
-function parseStatusChangeBlock(value: unknown): OspOrderStatus | null {
-  if (!value || typeof value !== "object") return null;
-  const block = value as Record<string, unknown>;
-
-  // StatusPro webhook: { status: { previous_status: "…", new_status: "…" } }
-  const newLabel =
-    block.new_status ??
-    block.newStatus ??
-    block.new ??
-    block.to ??
-    block.after ??
-    block.current;
-  if (typeof newLabel === "string" && newLabel.trim()) {
-    return { name: newLabel.trim() };
-  }
-
-  return firstParsedStatus(
-    block.to,
-    block.new,
-    block.current,
-    block.new_status,
-    block.newStatus,
-    block.after,
-  );
-}
-
-function parseStatusFromOrder(order: Record<string, unknown>): OspOrderStatus | null {
-  return firstParsedStatus(
-    order.status,
-    order.new_status,
-    order.newStatus,
-    order.to_status,
-    order.current_status,
-    order.order_status,
-  );
 }
 
 function parseOrderId(value: unknown): bigint | null {
@@ -133,6 +60,14 @@ function parseOrderId(value: unknown): bigint | null {
     }
   }
   return null;
+}
+
+function parseWebhookStatusName(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const block = value as Record<string, unknown>;
+  const newLabel = block.new_status ?? block.newStatus;
+  if (typeof newLabel !== "string" || !newLabel.trim()) return null;
+  return newLabel.trim();
 }
 
 /** GET /statuses — same options for every Record Planet order. */
@@ -151,28 +86,23 @@ export async function fetchStatusChoices(): Promise<StatusChoice[]> {
 }
 
 export function orderStatusFromRow(order: {
-  ospStatusCode: string | null;
   ospStatusName: string | null;
 }): { name?: string } | string {
   if (order.ospStatusName) {
     return { name: order.ospStatusName };
   }
-  if (order.ospStatusCode) {
-    return order.ospStatusCode;
-  }
   return "Unknown";
 }
 
-/** Webhook-only cache writes. */
+/** Webhook-only cache: StatusPro sends `status.new_status` as a display name. */
 export async function applyOrderStatusCache(
   orderId: bigint,
-  status: OspOrderStatus,
+  statusName: string,
 ): Promise<boolean> {
   const result = await prisma.order.updateMany({
     where: { id: orderId },
     data: {
-      ospStatusCode: status.code ?? null,
-      ospStatusName: status.name ?? status.code ?? null,
+      ospStatusName: statusName,
       ospStatusSyncedAt: new Date(),
     },
   });
@@ -181,7 +111,7 @@ export async function applyOrderStatusCache(
 
 export function parseOspWebhookPayload(
   body: unknown,
-): { orderId: bigint; status: OspOrderStatus } | null {
+): { orderId: bigint; statusName: string } | null {
   if (!body || typeof body !== "object") return null;
   const record = body as Record<string, unknown>;
 
@@ -190,46 +120,17 @@ export function parseOspWebhookPayload(
       ? (record.order as Record<string, unknown>)
       : null;
 
-  const nestedData =
-    record.data && typeof record.data === "object"
-      ? (record.data as Record<string, unknown>)
-      : null;
-
   const orderId =
     parseOrderId(record.order_id) ??
     parseOrderId(record.orderId) ??
-    parseOrderId(nestedOrder?.id) ??
-    parseOrderId(nestedData?.order_id) ??
-    parseOrderId(nestedData?.id);
+    parseOrderId(nestedOrder?.id);
 
   if (orderId == null) return null;
 
-  const status =
-    parseStatusChangeBlock(record.status) ??
-    parseStatusChangeBlock(record.status_change) ??
-    parseStatusFromOrder(nestedOrder ?? {}) ??
-    firstParsedStatus(nestedData?.status, nestedData?.new_status);
+  const statusName = parseWebhookStatusName(record.status);
+  if (!statusName) return null;
 
-  if (!status) return null;
-
-  return { orderId, status };
-}
-
-const WEBHOOK_LOG_CHUNK_SIZE = 400;
-
-/** Log full webhook body in parts (Netlify truncates single long lines). */
-export function logOspWebhookPayloadInChunks(rawBody: string): void {
-  const total = Math.max(1, Math.ceil(rawBody.length / WEBHOOK_LOG_CHUNK_SIZE));
-  console.log(
-    `[osp-webhook] payload length=${rawBody.length} parts=${total}`,
-  );
-  for (let i = 0; i < total; i++) {
-    const start = i * WEBHOOK_LOG_CHUNK_SIZE;
-    console.log(
-      `[osp-webhook] ${i + 1}/${total}:`,
-      rawBody.slice(start, start + WEBHOOK_LOG_CHUNK_SIZE),
-    );
-  }
+  return { orderId, statusName };
 }
 
 function safeEqual(a: string, b: string): boolean {

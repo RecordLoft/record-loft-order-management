@@ -1,0 +1,1 @@
+ALTER TABLE "Order" DROP COLUMN IF EXISTS "ospStatusCode";
