@@ -25,7 +25,6 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import {
-  useFetcher,
   useLoaderData,
   useNavigation,
   useRevalidator,
@@ -221,7 +220,6 @@ export default function RecordPlanetOrders() {
   const { searchQuery, customerGroups, totalOrders, shop } =
     useLoaderData<typeof loader>();
 
-  const fetcher = useFetcher();
   const revalidator = useRevalidator();
   const navigation = useNavigation();
   const [, setSearchParams] = useSearchParams();
@@ -437,13 +435,13 @@ export default function RecordPlanetOrders() {
         </Layout.Section>
       </Layout>
 
-      <StatusUpdateModal
-        open={showStatusModal}
-        onClose={() => setShowStatusModal(false)}
-        selectedIds={targetIds}
-        fetcher={fetcher}
-        onSuccess={handleStatusUpdateSuccess}
-      />
+      {showStatusModal && (
+        <StatusUpdateModal
+          selectedIds={targetIds}
+          onClose={() => setShowStatusModal(false)}
+          onSuccess={handleStatusUpdateSuccess}
+        />
+      )}
     </Page>
   );
 }

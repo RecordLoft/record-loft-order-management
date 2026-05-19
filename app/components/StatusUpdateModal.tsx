@@ -7,14 +7,12 @@ import {
 	SkeletonBodyText,
 } from "@shopify/polaris";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FetcherWithComponents } from "react-router";
+import { useFetcher } from "react-router";
 import type { StatusChoice } from "../order-status-pro.server";
 
 interface StatusUpdateModalProps {
-	open: boolean;
-	onClose: () => void;
 	selectedIds: string[];
-	fetcher: FetcherWithComponents<any>;
+	onClose: () => void;
 	onSuccess?: () => void;
 }
 
@@ -22,29 +20,22 @@ const SYNC_POLL_MS = 2_000;
 const SYNC_TIMEOUT_MS = 60_000;
 
 export function StatusUpdateModal({
-	open,
-	onClose,
 	selectedIds,
-	fetcher,
+	onClose,
 	onSuccess,
 }: StatusUpdateModalProps) {
+	const fetcher = useFetcher();
 	const [newStatus, setNewStatus] = useState<string[]>([]);
 	const [statusChoices, setStatusChoices] = useState<StatusChoice[]>([]);
 	const [isLoadingChoices, setIsLoadingChoices] = useState(false);
 	const [choicesError, setChoicesError] = useState<string | null>(null);
 	const [isWaitingForWebhook, setIsWaitingForWebhook] = useState(false);
 	const [syncError, setSyncError] = useState<string | null>(null);
-	const choicesFetchedForOrder = useRef<string | null>(null);
 	const pendingSyncRef = useRef<{ ids: string[]; statusName: string } | null>(
 		null,
 	);
 	const pollGenerationRef = useRef(0);
 	const wasSubmittingRef = useRef(false);
-	const onSuccessRef = useRef(onSuccess);
-	const onCloseRef = useRef(onClose);
-
-	onSuccessRef.current = onSuccess;
-	onCloseRef.current = onClose;
 
 	const isOverLimit = selectedIds.length > 50;
 	const representativeOrderId = selectedIds[0] ?? null;
@@ -54,21 +45,12 @@ export function StatusUpdateModal({
 	}, []);
 
 	useEffect(() => {
-		if (!open) {
-			setNewStatus([]);
-			setIsWaitingForWebhook(false);
-			setSyncError(null);
-			pendingSyncRef.current = null;
-			wasSubmittingRef.current = false;
-			choicesFetchedForOrder.current = null;
-			stopPolling();
-			return;
-		}
+		return () => stopPolling();
+	}, [stopPolling]);
 
+	useEffect(() => {
 		if (!representativeOrderId || isOverLimit) return;
-		if (choicesFetchedForOrder.current === representativeOrderId) return;
 
-		choicesFetchedForOrder.current = representativeOrderId;
 		setIsLoadingChoices(true);
 		setChoicesError(null);
 
@@ -88,13 +70,12 @@ export function StatusUpdateModal({
 				setStatusChoices(data);
 			})
 			.catch((error: unknown) => {
-				choicesFetchedForOrder.current = null;
 				setChoicesError(
 					error instanceof Error ? error.message : "Could not load statuses",
 				);
 			})
 			.finally(() => setIsLoadingChoices(false));
-	}, [open, isOverLimit, representativeOrderId, stopPolling]);
+	}, [isOverLimit, representativeOrderId]);
 
 	const handleAction = useCallback(() => {
 		const statusCode = newStatus[0];
@@ -150,9 +131,8 @@ export function StatusUpdateModal({
 				setSyncError(error);
 				return;
 			}
-			setNewStatus([]);
-			onSuccessRef.current?.();
-			onCloseRef.current();
+			onSuccess?.();
+			onClose();
 		};
 
 		const poll = async () => {
@@ -191,7 +171,7 @@ export function StatusUpdateModal({
 		};
 
 		void poll();
-	}, [fetcher.state, fetcher.data, stopPolling]);
+	}, [fetcher.state, fetcher.data, onClose, onSuccess, stopPolling]);
 
 	const handleClose = useCallback(() => {
 		if (isWaitingForWebhook) return;
@@ -203,7 +183,7 @@ export function StatusUpdateModal({
 
 	return (
 		<Modal
-			open={open}
+			open
 			onClose={handleClose}
 			title={selectedIds.length > 1 ? `Bulk Update ${selectedIds.length} Orders` : "Update Order Status"}
 			primaryAction={{
