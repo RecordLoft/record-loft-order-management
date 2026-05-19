@@ -18,6 +18,9 @@ interface StatusUpdateModalProps {
 	onSuccess?: () => void;
 }
 
+const SYNC_POLL_MS = 2_000;
+const SYNC_TIMEOUT_MS = 60_000;
+
 export function StatusUpdateModal({
 	open,
 	onClose,
@@ -32,19 +35,18 @@ export function StatusUpdateModal({
 	const [isWaitingForWebhook, setIsWaitingForWebhook] = useState(false);
 	const [syncError, setSyncError] = useState<string | null>(null);
 	const choicesFetchedForOrder = useRef<string | null>(null);
-	const eventSourceRef = useRef<EventSource | null>(null);
 	const pendingSyncRef = useRef<{ ids: string[]; statusName: string } | null>(
 		null,
 	);
 	const handledSuccessRef = useRef(false);
+	const onSuccessRef = useRef(onSuccess);
+	const onCloseRef = useRef(onClose);
+
+	onSuccessRef.current = onSuccess;
+	onCloseRef.current = onClose;
 
 	const isOverLimit = selectedIds.length > 50;
 	const representativeOrderId = selectedIds[0] ?? null;
-
-	const closeEventSource = useCallback(() => {
-		eventSourceRef.current?.close();
-		eventSourceRef.current = null;
-	}, []);
 
 	useEffect(() => {
 		if (!open) {
@@ -54,7 +56,6 @@ export function StatusUpdateModal({
 			pendingSyncRef.current = null;
 			handledSuccessRef.current = false;
 			choicesFetchedForOrder.current = null;
-			closeEventSource();
 			return;
 		}
 
@@ -115,19 +116,20 @@ export function StatusUpdateModal({
 		if (!pending) return;
 
 		handledSuccessRef.current = true;
-
 		setIsWaitingForWebhook(true);
-		closeEventSource();
 
 		const params = new URLSearchParams({
 			ids: pending.ids.join(","),
 			status_name: pending.statusName,
 		});
-		const es = new EventSource(`/api/order-status-watch?${params}`);
-		eventSourceRef.current = es;
+		const startedAt = Date.now();
+		let cancelled = false;
+		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (error?: string) => {
-			closeEventSource();
+			if (cancelled) return;
+			cancelled = true;
+			if (pollTimer) clearTimeout(pollTimer);
 			pendingSyncRef.current = null;
 			setIsWaitingForWebhook(false);
 			if (error) {
@@ -135,37 +137,57 @@ export function StatusUpdateModal({
 				return;
 			}
 			setNewStatus([]);
-			onSuccess?.();
-			onClose();
+			onSuccessRef.current?.();
+			onCloseRef.current();
 		};
 
-		es.addEventListener("synced", () => finish());
-		es.addEventListener("timeout", (event) => {
+		const poll = async () => {
+			if (cancelled) return;
+
+			if (Date.now() - startedAt > SYNC_TIMEOUT_MS) {
+				finish("Status did not sync from Order Status Pro in time.");
+				return;
+			}
+
 			try {
-				const data = JSON.parse((event as MessageEvent).data) as {
-					error?: string;
-				};
-				finish(data.error ?? "Status sync timed out.");
+				const res = await fetch(`/api/order-status-sync?${params}`);
+				const data = (await res.json()) as { synced?: boolean; error?: string };
+
+				if (res.status === 429) {
+					finish(
+						data.error ??
+							"Too many requests while checking status. Refresh the page in a few seconds.",
+					);
+					return;
+				}
+
+				if (!res.ok) {
+					pollTimer = setTimeout(() => {
+						void poll();
+					}, SYNC_POLL_MS);
+					return;
+				}
+
+				if (data.synced) {
+					finish();
+					return;
+				}
 			} catch {
-				finish("Status sync timed out.");
+				// transient network error — keep polling
 			}
-		});
-		es.onerror = () => {
-			if (eventSourceRef.current === es) {
-				finish("Lost connection while waiting for status sync.");
-			}
+
+			pollTimer = setTimeout(() => {
+				void poll();
+			}, SYNC_POLL_MS);
 		};
+
+		void poll();
 
 		return () => {
-			closeEventSource();
+			cancelled = true;
+			if (pollTimer) clearTimeout(pollTimer);
 		};
-	}, [
-		fetcher.state,
-		fetcher.data,
-		onClose,
-		onSuccess,
-		closeEventSource,
-	]);
+	}, [fetcher.state, fetcher.data]);
 
 	const handleClose = useCallback(() => {
 		if (isWaitingForWebhook) return;
@@ -173,8 +195,7 @@ export function StatusUpdateModal({
 	}, [isWaitingForWebhook, onClose]);
 
 	const choicesReady = statusChoices.length > 0;
-	const isBusy =
-		fetcher.state !== "idle" || isWaitingForWebhook;
+	const isBusy = fetcher.state !== "idle" || isWaitingForWebhook;
 
 	return (
 		<Modal

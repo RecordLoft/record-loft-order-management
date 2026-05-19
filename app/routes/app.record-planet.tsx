@@ -22,7 +22,7 @@ import {
   recordPlanetOrderWhere,
   type GloboProperties,
 } from "../record-planet.server";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import {
   useFetcher,
@@ -231,6 +231,11 @@ export default function RecordPlanetOrders() {
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [targetIds, setTargetIds] = useState<string[]>([]);
 
+  const handleStatusUpdateSuccess = useCallback(() => {
+    revalidator.revalidate();
+    setSelectedOrderIds([]);
+  }, [revalidator]);
+
   const isSearching = navigation.state === "loading";
 
   useEffect(() => {
@@ -437,10 +442,7 @@ export default function RecordPlanetOrders() {
         onClose={() => setShowStatusModal(false)}
         selectedIds={targetIds}
         fetcher={fetcher}
-        onSuccess={() => {
-          revalidator.revalidate();
-          setSelectedOrderIds([]);
-        }}
+        onSuccess={handleStatusUpdateSuccess}
       />
     </Page>
   );
