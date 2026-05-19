@@ -54,6 +54,9 @@ function toStatusChoices(statuses: StatusOption[]): StatusChoice[] {
 }
 
 function parseStatusObject(status: unknown): OspOrderStatus | null {
+  if (typeof status === "string" && status.trim()) {
+    return { code: status.trim() };
+  }
   if (!status || typeof status !== "object") return null;
   const record = status as {
     code?: unknown;
@@ -78,6 +81,58 @@ function firstParsedStatus(...candidates: unknown[]): OspOrderStatus | null {
     const parsed = parseStatusObject(candidate);
     if (parsed) return parsed;
   }
+  return null;
+}
+
+function parseFlatStatusFields(
+  record: Record<string, unknown>,
+): OspOrderStatus | null {
+  const code = record.status_code ?? record.statusCode;
+  const name =
+    record.status_name ?? record.statusName ?? record.public_name;
+  const parsedCode = typeof code === "string" ? code : undefined;
+  const parsedName = typeof name === "string" ? name : undefined;
+  if (!parsedCode && !parsedName) return null;
+  return { code: parsedCode, name: parsedName };
+}
+
+function parseStatusChangeBlock(value: unknown): OspOrderStatus | null {
+  if (!value || typeof value !== "object") return null;
+  const block = value as Record<string, unknown>;
+  return firstParsedStatus(
+    block.to,
+    block.new,
+    block.current,
+    block.new_status,
+    block.newStatus,
+    block.after,
+  );
+}
+
+function parseStatusFromOrder(order: Record<string, unknown>): OspOrderStatus | null {
+  const direct = firstParsedStatus(
+    order.status,
+    order.new_status,
+    order.newStatus,
+    order.to_status,
+    order.current_status,
+    order.order_status,
+  );
+  if (direct) return direct;
+
+  const flat = parseFlatStatusFields(order);
+  if (flat) return flat;
+
+  for (const [key, value] of Object.entries(order)) {
+    if (!/status/i.test(key)) continue;
+    const parsed = parseStatusObject(value) ?? parseFlatStatusFields(
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)
+        : {},
+    );
+    if (parsed) return parsed;
+  }
+
   return null;
 }
 
@@ -160,26 +215,26 @@ export function parseOspWebhookPayload(
     parseOrderId(record.orderId) ??
     parseOrderId(nestedOrder?.id) ??
     parseOrderId(nestedData?.order_id) ??
-    parseOrderId(nestedData?.id) ??
-    parseOrderId(record.id);
+    parseOrderId(nestedData?.id);
 
   if (orderId == null) return null;
 
-  const status = firstParsedStatus(
-    record.status,
-    record.new_status,
-    record.newStatus,
-    record.to_status,
-    record.toStatus,
-    record.current_status,
-    record.order_status,
-    nestedOrder?.status,
-    nestedOrder?.new_status,
-    nestedOrder?.to_status,
-    nestedOrder?.order_status,
-    nestedData?.status,
-    nestedData?.new_status,
-  );
+  const status =
+    parseStatusFromOrder(nestedOrder ?? {}) ??
+    firstParsedStatus(
+      record.status,
+      record.new_status,
+      record.newStatus,
+      record.to_status,
+      record.toStatus,
+      record.current_status,
+      record.order_status,
+      record.after,
+      parseStatusChangeBlock(record.status_change),
+      nestedData?.status,
+      nestedData?.new_status,
+    ) ??
+    parseFlatStatusFields(record);
 
   if (!status) return null;
 
@@ -198,6 +253,25 @@ function safeEqual(a: string, b: string): boolean {
  * Set ORDER_STATUS_PRO_WEBHOOK_TOKEN in env and register:
  *   https://<host>/api/webhooks/order-status-pro/<token>
  */
+const WEBHOOK_DEBUG_CHUNK_SIZE = 400;
+
+/** Netlify truncates long log lines; split payload when ORDER_STATUS_PRO_WEBHOOK_DEBUG=true. */
+export function logOspWebhookPayloadDebug(rawBody: string): void {
+  if (process.env.ORDER_STATUS_PRO_WEBHOOK_DEBUG !== "true") return;
+
+  const total = Math.max(1, Math.ceil(rawBody.length / WEBHOOK_DEBUG_CHUNK_SIZE));
+  console.log(
+    `[osp-webhook:debug] payload length=${rawBody.length} parts=${total}`,
+  );
+  for (let i = 0; i < total; i++) {
+    const start = i * WEBHOOK_DEBUG_CHUNK_SIZE;
+    console.log(
+      `[osp-webhook:debug] ${i + 1}/${total}:`,
+      rawBody.slice(start, start + WEBHOOK_DEBUG_CHUNK_SIZE),
+    );
+  }
+}
+
 export function verifyOspWebhookToken(urlToken: string | undefined): boolean {
   const expected = process.env.ORDER_STATUS_PRO_WEBHOOK_TOKEN?.trim();
   if (!expected) {
