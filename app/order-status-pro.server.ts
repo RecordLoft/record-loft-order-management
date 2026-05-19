@@ -9,6 +9,22 @@ const WINDOW_MS = 10_000;
 
 const requestTimestamps: number[] = [];
 
+const LOG_PREFIX = "[statuspro-api]";
+
+function pruneRequestWindow(now = Date.now()): void {
+  while (
+    requestTimestamps.length > 0 &&
+    now - requestTimestamps[0]! >= WINDOW_MS
+  ) {
+    requestTimestamps.shift();
+  }
+}
+
+function getWindowRequestCount(): number {
+  pruneRequestWindow();
+  return requestTimestamps.length;
+}
+
 function getApiKey(): string {
   const apiKey = process.env.ORDER_STATUS_PRO_API_KEY;
   if (!apiKey) {
@@ -17,22 +33,22 @@ function getApiKey(): string {
   return apiKey;
 }
 
-async function waitForRateLimitSlot(): Promise<void> {
+/** Returns total ms spent waiting for a rate-limit slot. */
+async function waitForRateLimitSlot(): Promise<number> {
   const now = Date.now();
-  while (
-    requestTimestamps.length > 0 &&
-    now - requestTimestamps[0]! >= WINDOW_MS
-  ) {
-    requestTimestamps.shift();
-  }
+  pruneRequestWindow(now);
 
   if (requestTimestamps.length >= REQUESTS_PER_WINDOW) {
     const waitMs = WINDOW_MS - (now - requestTimestamps[0]!) + 50;
+    console.warn(
+      `${LOG_PREFIX} client throttle: ${requestTimestamps.length}/${REQUESTS_PER_WINDOW} requests in ${WINDOW_MS}ms window, waiting ${waitMs}ms`,
+    );
     await new Promise((resolve) => setTimeout(resolve, waitMs));
-    return waitForRateLimitSlot();
+    return waitMs + (await waitForRateLimitSlot());
   }
 
   requestTimestamps.push(Date.now());
+  return 0;
 }
 
 export type StatusChoice = { label: string; value: string };
@@ -77,6 +93,7 @@ function parseWebhookStatusName(value: unknown): string | null {
 export async function fetchViableStatusChoices(
   orderId: bigint,
 ): Promise<StatusChoice[]> {
+  console.log(`${LOG_PREFIX} fetchViableStatusChoices orderId=${orderId}`);
   const response = await fetchOrderStatusPro(
     `/orders/${orderId}/viable-statuses`,
   );
@@ -247,9 +264,16 @@ export async function fetchOrderStatusPro(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
-  await waitForRateLimitSlot();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const waitedMs = await waitForRateLimitSlot();
+  const windowCount = getWindowRequestCount();
 
-  return fetch(`${OSP_BASE}${path}`, {
+  console.log(
+    `${LOG_PREFIX} request ${method} ${path} window=${windowCount}/${REQUESTS_PER_WINDOW}${waitedMs > 0 ? ` waited=${waitedMs}ms` : ""}`,
+  );
+
+  const startedAt = Date.now();
+  const response = await fetch(`${OSP_BASE}${path}`, {
     ...init,
     headers: {
       Authorization: `Bearer ${getApiKey()}`,
@@ -257,12 +281,27 @@ export async function fetchOrderStatusPro(
       ...init?.headers,
     },
   });
+  const elapsedMs = Date.now() - startedAt;
+
+  const line = `${LOG_PREFIX} response ${method} ${path} -> ${response.status} ${elapsedMs}ms`;
+  if (response.status === 429) {
+    console.warn(`${line} (rate limited by Order Status Pro)`);
+  } else if (!response.ok) {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
+
+  return response;
 }
 
 export async function bulkUpdateOrderStatus(
   orderIds: bigint[],
   statusCode: string,
 ): Promise<void> {
+  console.log(
+    `${LOG_PREFIX} bulkUpdateOrderStatus orders=${orderIds.length} statusCode=${statusCode}`,
+  );
   const response = await fetchOrderStatusPro("/orders/bulk-status", {
     method: "POST",
     body: JSON.stringify({

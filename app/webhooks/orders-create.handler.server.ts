@@ -1,5 +1,9 @@
 import { prisma } from "../db.server";
 import type { GraphqlRequest } from "../product-description.server";
+import {
+  markFulfillmentOrdersInProgress,
+  type FulfillmentOrderForProgress,
+} from "../shopify-fulfillment.server";
 
 type OrderWebhookPayload = {
   id: number;
@@ -81,20 +85,33 @@ export async function handleOrdersCreate(
 
   let productMap = new Map<
     string,
-    { productType: string | null; storeSection: string | null; category: string | null }
+    {
+      productType: string | null;
+      storeSection: string | null;
+      category: string | null;
+    }
   >();
   let deliveryMethod: string | null = null;
+  let fulfillmentOrders: FulfillmentOrderForProgress[] = [];
 
   if (productIds.length > 0) {
-    console.log(`[${threadId}] Fetching product information for IDs:`, productIds);
+    console.log(
+      `[${threadId}] Fetching product information for IDs:`,
+      productIds,
+    );
     const response = await graphql(
       `
         query getOrderEnrichment($orderId: ID!, $productIds: [ID!]!) {
           order(id: $orderId) {
-            fulfillmentOrders(first: 1) {
+            fulfillmentOrders(first: 20) {
               nodes {
+                id
+                status
                 deliveryMethod {
                   methodType
+                }
+                supportedActions {
+                  action
                 }
               }
             }
@@ -103,8 +120,15 @@ export async function handleOrdersCreate(
             ... on Product {
               id
               productType
-              category { name }
-              storeSection: metafield(namespace: "custom", key: "store_section") { value }
+              category {
+                name
+              }
+              storeSection: metafield(
+                namespace: "custom"
+                key: "store_section"
+              ) {
+                value
+              }
             }
           }
         }
@@ -127,9 +151,7 @@ export async function handleOrdersCreate(
         } | null>;
         order?: {
           fulfillmentOrders?: {
-            nodes: Array<{
-              deliveryMethod?: { methodType?: string | null } | null;
-            }>;
+            nodes: FulfillmentOrderForProgress[];
           };
         };
       };
@@ -154,9 +176,10 @@ export async function handleOrdersCreate(
       });
     }
 
+    fulfillmentOrders = json.data?.order?.fulfillmentOrders?.nodes ?? [];
+
     deliveryMethod =
-      json.data?.order?.fulfillmentOrders?.nodes[0]?.deliveryMethod?.methodType?.toLowerCase() ??
-      null;
+      fulfillmentOrders[0]?.deliveryMethod?.methodType?.toLowerCase() ?? null;
 
     const hasRecordPlanetItem = line_items.some(
       (item) =>
@@ -171,7 +194,9 @@ export async function handleOrdersCreate(
 
   console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`);
   console.log(`[${threadId}] Source name: ${source_name}`);
-  console.log(`[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`);
+  console.log(
+    `[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`,
+  );
 
   const customerPhone = resolveCustomerPhone(payload);
 
@@ -242,6 +267,32 @@ export async function handleOrdersCreate(
   }
 
   console.log(`[${threadId}] Imported order ${BigInt(id)}`);
+
+  if (deliveryMethod === "recordPlanet") {
+    const progress = await markFulfillmentOrdersInProgress(
+      graphql,
+      fulfillmentOrders,
+      {
+        logPrefix: threadId,
+        reasonNotes: "Record Planet Shipping order received",
+      },
+    );
+
+    if (!progress.ok) {
+      return {
+        outcome: "error",
+        code: progress.code,
+        message: progress.message,
+      };
+    }
+
+    const detail =
+      progress.marked > 0
+        ? `imported, ${progress.marked} fulfillment(s) in progress`
+        : "imported, fulfillment already in progress";
+
+    return { outcome: "completed", detail };
+  }
 
   return { outcome: "completed", detail: "imported" };
 }
