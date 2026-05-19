@@ -1,24 +1,25 @@
 /**
- * Inspect webhook queue jobs in the database.
+ * Inspect webhook failures in the database.
  *
  *   SHOP=your-store.myshopify.com yarn retry:webhooks -- --list --status failed
  *
- * Cron (every 6h) retries failed jobs; webhooks process immediately via waitUntil.
- * Run a cron tick locally: yarn process:webhooks
+ * Cron (every 6h) retries failed rows; webhooks process inline on delivery.
  */
 import "dotenv/config";
-import { listWebhookJobs } from "../app/webhook-queue.server";
+import { listWebhookFailures } from "../app/webhook-queue.server";
 import {
-  WebhookJobHandler,
-  WebhookJobStatus,
+  WebhookFailureHandler,
+  WebhookFailureStatus,
 } from "../generated/prisma/client";
 
-function parseHandler(raw: string | undefined): WebhookJobHandler | undefined {
+function parseHandler(
+  raw: string | undefined,
+): WebhookFailureHandler | undefined {
   if (!raw) return undefined;
-  const normalized = raw as WebhookJobHandler;
-  if (Object.values(WebhookJobHandler).includes(normalized)) return normalized;
+  const normalized = raw as WebhookFailureHandler;
+  if (Object.values(WebhookFailureHandler).includes(normalized)) return normalized;
   console.error(
-    `Unknown handler "${raw}". Use: ${Object.values(WebhookJobHandler).join(", ")}`,
+    `Unknown handler "${raw}". Use: ${Object.values(WebhookFailureHandler).join(", ")}`,
   );
   process.exit(1);
 }
@@ -28,8 +29,8 @@ function parseArgs(argv: string[]) {
   const statusRaw = statusIndex === -1 ? undefined : argv[statusIndex + 1];
   const status =
     statusRaw &&
-    Object.values(WebhookJobStatus).includes(statusRaw as WebhookJobStatus)
-      ? (statusRaw as WebhookJobStatus)
+    Object.values(WebhookFailureStatus).includes(statusRaw as WebhookFailureStatus)
+      ? (statusRaw as WebhookFailureStatus)
       : undefined;
 
   const handlerIndex = argv.indexOf("--handler");
@@ -57,28 +58,28 @@ async function main() {
   }
 
   const { status, handler, limit } = parseArgs(process.argv.slice(2));
-  const jobs = await listWebhookJobs(shop, { status, handler, limit });
+  const failures = await listWebhookFailures(shop, { status, handler, limit });
 
-  if (jobs.length === 0) {
+  if (failures.length === 0) {
     console.log(
-      `No jobs for ${shop}${status ? ` (${status})` : ""}${handler ? ` handler=${handler}` : ""}.`,
+      `No webhook failures for ${shop}${status ? ` (${status})` : ""}${handler ? ` handler=${handler}` : ""}.`,
     );
     return;
   }
 
-  console.log(`Webhook jobs for ${shop}:\n`);
-  for (const job of jobs) {
+  console.log(`Webhook failures for ${shop}:\n`);
+  for (const row of failures) {
     console.log(
       [
-        job.id,
-        `handler=${job.handler}`,
-        `resource=${job.resourceId}`,
-        `topic=${job.topic}`,
-        `status=${job.status}`,
-        `attempts=${job.attempts}/${job.maxAttempts}`,
-        job.outcome ? `outcome=${job.outcome}` : null,
-        job.errorCode ? `code=${job.errorCode}` : null,
-        job.errorMessage ? `error=${job.errorMessage}` : null,
+        row.id,
+        `handler=${row.handler}`,
+        `resource=${row.resourceId}`,
+        `topic=${row.topic}`,
+        `status=${row.status}`,
+        `attempts=${row.attempts}/${row.maxAttempts}`,
+        row.outcome ? `outcome=${row.outcome}` : null,
+        row.errorCode ? `code=${row.errorCode}` : null,
+        row.errorMessage ? `error=${row.errorMessage}` : null,
       ]
         .filter(Boolean)
         .join(" | "),

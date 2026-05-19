@@ -2,8 +2,8 @@ import { schedule } from "@netlify/functions";
 import { runWebhookQueueCron } from "../../app/webhook-queue.server";
 
 /**
- * Recovery-only scheduled function (~4×/day). Webhooks already return 200 and
- * process via waitUntil in the main SSR handler; this drains failed/pending backlog.
+ * Retries rows in WebhookFailure (~4×/day). Webhooks process inline; only
+ * failures are persisted and drained here (not via local scripts or waitUntil).
  *
  * Set WEBHOOK_CRON_ENABLED=false to disable (~120 invocations/month saved).
  */

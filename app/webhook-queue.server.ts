@@ -1,7 +1,7 @@
 import {
-  WebhookJobHandler,
-  WebhookJobStatus,
-  type WebhookJob,
+  WebhookFailureHandler,
+  WebhookFailureStatus,
+  type WebhookFailure,
 } from "../generated/prisma/client";
 import { prisma } from "./db.server";
 import type { GraphqlRequest } from "./product-description.server";
@@ -10,12 +10,12 @@ import { handleOrdersCreate } from "./webhooks/orders-create.handler.server";
 import { handleProductDescriptionSync } from "./webhooks/product-description.handler.server";
 
 const STALE_PROCESSING_MS = 10 * 60 * 1000;
-/** Max jobs per cron tick (avoids function timeout / API rate limits — not invocation count). */
+/** Max failures per cron tick (avoids function timeout / API rate limits). */
 export const CRON_BATCH_LIMIT = 20;
 
 export const WEBHOOK_HANDLERS = {
-  PRODUCT_DESCRIPTION_SYNC: WebhookJobHandler.product_description_sync,
-  ORDERS_CREATE: WebhookJobHandler.orders_create,
+  PRODUCT_DESCRIPTION_SYNC: WebhookFailureHandler.product_description_sync,
+  ORDERS_CREATE: WebhookFailureHandler.orders_create,
 } as const;
 
 export const WEBHOOK_ERROR_CODES = {
@@ -25,9 +25,9 @@ export const WEBHOOK_ERROR_CODES = {
   UNKNOWN_HANDLER: "unknown_handler",
 } as const;
 
-export type EnqueueWebhookJobInput = {
+export type WebhookWorkInput = {
   shop: string;
-  handler: WebhookJobHandler;
+  handler: WebhookFailureHandler;
   topic: string;
   resourceId: number | bigint;
   resourceGid?: string;
@@ -35,16 +35,20 @@ export type EnqueueWebhookJobInput = {
   payload: unknown;
 };
 
-export type ProcessWebhookJobsOptions = {
+export type ProcessWebhookFailuresOptions = {
   limit?: number;
   shop?: string;
-  handler?: WebhookJobHandler;
+  handler?: WebhookFailureHandler;
   graphql?: GraphqlRequest;
 };
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function resourceIdBigInt(input: WebhookWorkInput): bigint {
+  return BigInt(input.resourceId);
 }
 
 async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
@@ -61,30 +65,33 @@ async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
 }
 
 async function runHandler(
-  job: WebhookJob,
+  work: Pick<
+    WebhookFailure,
+    "shop" | "handler" | "payload"
+  >,
   graphql: GraphqlRequest,
 ): Promise<
   | { type: "success"; outcome: "completed" | "skipped"; detail: string }
   | { type: "error"; code: string; message: string; detail?: string }
 > {
-  switch (job.handler) {
-    case WebhookJobHandler.product_description_sync:
+  switch (work.handler) {
+    case WebhookFailureHandler.product_description_sync:
       return mapHandlerResult(
         await handleProductDescriptionSync(
-          job.shop,
-          job.payload as { id: number },
+          work.shop,
+          work.payload as { id: number },
           graphql,
         ),
       );
-    case WebhookJobHandler.orders_create:
+    case WebhookFailureHandler.orders_create:
       return mapHandlerResult(
-        await handleOrdersCreate(job.shop, job.payload as never, graphql),
+        await handleOrdersCreate(work.shop, work.payload as never, graphql),
       );
     default:
       return {
         type: "error",
         code: WEBHOOK_ERROR_CODES.UNKNOWN_HANDLER,
-        message: `Unknown handler: ${job.handler}`,
+        message: `Unknown handler: ${work.handler}`,
       };
   }
 }
@@ -108,15 +115,92 @@ function mapHandlerResult(
   };
 }
 
-export async function recoverStaleWebhookJobs(): Promise<number> {
-  const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS);
-  const result = await prisma.webhookJob.updateMany({
+async function clearWebhookFailure(input: WebhookWorkInput): Promise<void> {
+  await prisma.webhookFailure.deleteMany({
     where: {
-      status: WebhookJobStatus.processing,
+      shop: input.shop,
+      handler: input.handler,
+      resourceId: resourceIdBigInt(input),
+    },
+  });
+}
+
+async function upsertWebhookFailure(
+  input: WebhookWorkInput,
+  errorCode: string,
+  errorMessage: string,
+  options: {
+    outcome?: string | null;
+    attempts: number;
+    status: WebhookFailureStatus;
+    completedAt?: Date | null;
+  },
+) {
+  const resourceId = resourceIdBigInt(input);
+
+  return prisma.webhookFailure.upsert({
+    where: {
+      shop_handler_resourceId: {
+        shop: input.shop,
+        handler: input.handler,
+        resourceId,
+      },
+    },
+    create: {
+      shop: input.shop,
+      handler: input.handler,
+      topic: input.topic,
+      resourceId,
+      resourceGid: input.resourceGid ?? null,
+      webhookId: input.webhookId ?? null,
+      payload: input.payload as object,
+      status: options.status,
+      outcome: options.outcome ?? null,
+      errorCode,
+      errorMessage,
+      attempts: options.attempts,
+      lastAttemptAt: new Date(),
+      completedAt: options.completedAt ?? null,
+    },
+    update: {
+      topic: input.topic,
+      resourceGid: input.resourceGid ?? undefined,
+      webhookId: input.webhookId ?? undefined,
+      payload: input.payload as object,
+      status: options.status,
+      outcome: options.outcome ?? null,
+      errorCode,
+      errorMessage,
+      attempts: options.attempts,
+      lastAttemptAt: new Date(),
+      completedAt: options.completedAt ?? null,
+    },
+  });
+}
+
+/** Persist when there is no offline session (cron can retry after app install). */
+export async function recordWebhookFailureNoSession(input: WebhookWorkInput) {
+  return upsertWebhookFailure(
+    input,
+    WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
+    "No offline session for shop. Open the app once so a session is saved.",
+    {
+      status: WebhookFailureStatus.failed,
+      attempts: 0,
+      completedAt: new Date(),
+    },
+  );
+}
+
+export async function recoverStaleWebhookFailures(): Promise<number> {
+  const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS);
+  const result = await prisma.webhookFailure.updateMany({
+    where: {
+      status: WebhookFailureStatus.processing,
       lastAttemptAt: { lt: staleBefore },
     },
     data: {
-      status: WebhookJobStatus.pending,
+      status: WebhookFailureStatus.pending,
       errorCode: WEBHOOK_ERROR_CODES.STALE_PROCESSING,
       errorMessage: "Job was processing too long; re-queued automatically",
     },
@@ -124,136 +208,80 @@ export async function recoverStaleWebhookJobs(): Promise<number> {
   return result.count;
 }
 
-export async function enqueueWebhookJobNoSession(input: EnqueueWebhookJobInput) {
-  const resourceId = BigInt(input.resourceId);
-
-  return prisma.webhookJob.upsert({
-    where: {
-      shop_handler_resourceId: {
-        shop: input.shop,
-        handler: input.handler,
-        resourceId,
-      },
-    },
-    create: {
-      shop: input.shop,
-      handler: input.handler,
-      topic: input.topic,
-      resourceId,
-      resourceGid: input.resourceGid ?? null,
-      webhookId: input.webhookId ?? null,
-      payload: input.payload as object,
-      status: WebhookJobStatus.failed,
-      errorCode: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
-      errorMessage:
-        "No offline session for shop. Open the app once so a session is saved.",
-      completedAt: new Date(),
-    },
-    update: {
-      topic: input.topic,
-      resourceGid: input.resourceGid ?? undefined,
-      webhookId: input.webhookId ?? undefined,
-      payload: input.payload as object,
-      status: WebhookJobStatus.failed,
-      outcome: null,
-      errorCode: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
-      errorMessage:
-        "No offline session for shop. Open the app once so a session is saved.",
-      completedAt: new Date(),
-    },
-  });
-}
-
-export async function enqueueWebhookJob(input: EnqueueWebhookJobInput) {
-  const resourceId = BigInt(input.resourceId);
-
-  return prisma.webhookJob.upsert({
-    where: {
-      shop_handler_resourceId: {
-        shop: input.shop,
-        handler: input.handler,
-        resourceId,
-      },
-    },
-    create: {
-      shop: input.shop,
-      handler: input.handler,
-      topic: input.topic,
-      resourceId,
-      resourceGid: input.resourceGid ?? null,
-      webhookId: input.webhookId ?? null,
-      payload: input.payload as object,
-      status: WebhookJobStatus.pending,
-    },
-    update: {
-      topic: input.topic,
-      resourceGid: input.resourceGid ?? undefined,
-      webhookId: input.webhookId ?? undefined,
-      payload: input.payload as object,
-      status: WebhookJobStatus.pending,
-      outcome: null,
-      errorCode: null,
-      errorMessage: null,
-      completedAt: null,
-      attempts: 0,
-    },
-  });
-}
-
-async function markJobFailed(
-  jobId: string,
+async function recordFailureFromWork(
+  input: WebhookWorkInput,
   errorCode: string,
   errorMessage: string,
-  outcome?: string | null,
+  outcome: string | null | undefined,
+  attempts: number,
+  maxAttempts: number,
 ) {
-  const job = await prisma.webhookJob.findUnique({ where: { id: jobId } });
-  if (!job) return;
-
-  const exhausted = job.attempts >= job.maxAttempts;
-
-  await prisma.webhookJob.update({
-    where: { id: jobId },
-    data: {
-      status: exhausted ? WebhookJobStatus.failed : WebhookJobStatus.pending,
-      outcome: outcome ?? null,
-      errorCode,
-      errorMessage,
-      completedAt: exhausted ? new Date() : null,
-    },
+  const exhausted = attempts >= maxAttempts;
+  await upsertWebhookFailure(input, errorCode, errorMessage, {
+    outcome: outcome ?? null,
+    attempts,
+    status: exhausted
+      ? WebhookFailureStatus.failed
+      : WebhookFailureStatus.pending,
+    completedAt: exhausted ? new Date() : null,
   });
 }
 
-async function markJobSuccess(
-  jobId: string,
-  status: "completed" | "skipped",
-  outcome: string,
-) {
-  await prisma.webhookJob.update({
-    where: { id: jobId },
-    data: {
-      status:
-        status === "skipped"
-          ? WebhookJobStatus.skipped
-          : WebhookJobStatus.completed,
-      outcome,
-      errorCode: null,
-      errorMessage: null,
-      completedAt: new Date(),
-    },
-  });
+/**
+ * Run handler during the webhook request. Success clears any stored failure;
+ * errors are upserted for scheduled cron retry (not processed locally).
+ */
+export async function processWebhookWork(
+  input: WebhookWorkInput,
+  graphql?: GraphqlRequest,
+): Promise<"success" | "failure"> {
+  const runGraphql = graphql ?? (await graphqlForShop(input.shop));
+
+  if (!runGraphql) {
+    await recordWebhookFailureNoSession(input);
+    return "failure";
+  }
+
+  try {
+    const result = await runHandler(input, runGraphql);
+    if (result.type === "success") {
+      await clearWebhookFailure(input);
+      return "success";
+    }
+
+    await recordFailureFromWork(
+      input,
+      result.code,
+      result.message,
+      result.detail,
+      1,
+      5,
+    );
+    return "failure";
+  } catch (error) {
+    await recordFailureFromWork(
+      input,
+      WEBHOOK_ERROR_CODES.UNEXPECTED,
+      formatError(error),
+      null,
+      1,
+      5,
+    );
+    return "failure";
+  }
 }
 
-export async function processWebhookJob(
-  jobId: string,
+export async function processWebhookFailure(
+  failureId: string,
   graphql?: GraphqlRequest,
 ): Promise<boolean> {
-  const claimed = await prisma.webhookJob.updateMany({
+  const claimed = await prisma.webhookFailure.updateMany({
     where: {
-      id: jobId,
-      status: WebhookJobStatus.pending,
+      id: failureId,
+      status: WebhookFailureStatus.pending,
     },
     data: {
-      status: WebhookJobStatus.processing,
+      status: WebhookFailureStatus.processing,
       attempts: { increment: 1 },
       lastAttemptAt: new Date(),
     },
@@ -261,45 +289,71 @@ export async function processWebhookJob(
 
   if (claimed.count === 0) return false;
 
-  const job = await prisma.webhookJob.findUniqueOrThrow({ where: { id: jobId } });
-  const runGraphql = graphql ?? (await graphqlForShop(job.shop));
+  const row = await prisma.webhookFailure.findUniqueOrThrow({
+    where: { id: failureId },
+  });
+  const work: WebhookWorkInput = {
+    shop: row.shop,
+    handler: row.handler,
+    topic: row.topic,
+    resourceId: row.resourceId,
+    resourceGid: row.resourceGid ?? undefined,
+    webhookId: row.webhookId,
+    payload: row.payload,
+  };
+
+  const runGraphql = graphql ?? (await graphqlForShop(row.shop));
 
   if (!runGraphql) {
-    await markJobFailed(
-      jobId,
+    await recordFailureFromWork(
+      work,
       WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
-      `No offline session for shop ${job.shop}. Open the app on this store once.`,
+      `No offline session for shop ${row.shop}. Open the app on this store once.`,
+      null,
+      row.attempts,
+      row.maxAttempts,
     );
     return true;
   }
 
   try {
-    const result = await runHandler(job, runGraphql);
+    const result = await runHandler(row, runGraphql);
     if (result.type === "success") {
-      await markJobSuccess(jobId, result.outcome, result.detail);
-    } else {
-      await markJobFailed(jobId, result.code, result.message, result.detail);
+      await prisma.webhookFailure.delete({ where: { id: failureId } });
+      return true;
     }
+
+    await recordFailureFromWork(
+      work,
+      result.code,
+      result.message,
+      result.detail,
+      row.attempts,
+      row.maxAttempts,
+    );
   } catch (error) {
-    await markJobFailed(
-      jobId,
+    await recordFailureFromWork(
+      work,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
       formatError(error),
+      null,
+      row.attempts,
+      row.maxAttempts,
     );
   }
 
   return true;
 }
 
-export async function processPendingWebhookJobs(
-  options: ProcessWebhookJobsOptions = {},
-): Promise<{ processed: number; jobIds: string[] }> {
-  await recoverStaleWebhookJobs();
+export async function processPendingWebhookFailures(
+  options: ProcessWebhookFailuresOptions = {},
+): Promise<{ processed: number; failureIds: string[] }> {
+  await recoverStaleWebhookFailures();
 
   const limit = options.limit ?? 25;
-  const pending = await prisma.webhookJob.findMany({
+  const pending = await prisma.webhookFailure.findMany({
     where: {
-      status: WebhookJobStatus.pending,
+      status: WebhookFailureStatus.pending,
       ...(options.shop ? { shop: options.shop } : {}),
       ...(options.handler ? { handler: options.handler } : {}),
     },
@@ -308,23 +362,23 @@ export async function processPendingWebhookJobs(
     select: { id: true },
   });
 
-  const jobIds: string[] = [];
+  const failureIds: string[] = [];
   for (const { id } of pending) {
-    const ran = await processWebhookJob(id, options.graphql);
-    if (ran) jobIds.push(id);
+    const ran = await processWebhookFailure(id, options.graphql);
+    if (ran) failureIds.push(id);
   }
 
-  return { processed: jobIds.length, jobIds };
+  return { processed: failureIds.length, failureIds };
 }
 
-/** Cron: reset failed jobs to pending (including no-session retries). */
-export async function requeueFailedWebhookJobsForCron(
+/** Cron: reset terminal failed rows to pending (including no-session retries). */
+export async function requeueFailedWebhookFailuresForCron(
   options: { limit?: number } = {},
 ): Promise<number> {
   const limit = options.limit ?? CRON_BATCH_LIMIT;
 
-  const failed = await prisma.webhookJob.findMany({
-    where: { status: WebhookJobStatus.failed },
+  const failed = await prisma.webhookFailure.findMany({
+    where: { status: WebhookFailureStatus.failed },
     orderBy: { updatedAt: "asc" },
     take: limit,
     select: { id: true },
@@ -332,10 +386,10 @@ export async function requeueFailedWebhookJobsForCron(
 
   if (failed.length === 0) return 0;
 
-  await prisma.webhookJob.updateMany({
+  await prisma.webhookFailure.updateMany({
     where: { id: { in: failed.map((j) => j.id) } },
     data: {
-      status: WebhookJobStatus.pending,
+      status: WebhookFailureStatus.pending,
       outcome: null,
       errorCode: null,
       errorMessage: null,
@@ -351,61 +405,36 @@ export type WebhookQueueCronResult = {
   staleRecovered: number;
   failedRequeued: number;
   processed: number;
-  jobIds: string[];
+  failureIds: string[];
 };
 
 /**
- * Scheduled recovery only — for jobs the webhook invocation did not finish
- * (failed, stale processing, or waitUntil timed out). Not used on the happy path.
+ * Scheduled recovery only — retries rows in WebhookFailure (not used on happy path).
  */
 export async function runWebhookQueueCron(
   options: { batchSize?: number } = {},
 ): Promise<WebhookQueueCronResult> {
   const batchSize = options.batchSize ?? CRON_BATCH_LIMIT;
-  const staleRecovered = await recoverStaleWebhookJobs();
-  const failedRequeued = await requeueFailedWebhookJobsForCron({
+  const staleRecovered = await recoverStaleWebhookFailures();
+  const failedRequeued = await requeueFailedWebhookFailuresForCron({
     limit: batchSize,
   });
-  const { processed, jobIds } = await processPendingWebhookJobs({
+  const { processed, failureIds } = await processPendingWebhookFailures({
     limit: batchSize,
   });
 
-  return { staleRecovered, failedRequeued, processed, jobIds };
+  return { staleRecovered, failedRequeued, processed, failureIds };
 }
 
-type WaitUntilContext = { waitUntil?: (promise: Promise<unknown>) => void };
-
-/**
- * Try to process this job in the same serverless invocation as the webhook (via
- * waitUntil after the 200 response). Does not start a second Netlify function.
- */
-export function scheduleImmediateWebhookJobProcessing(
-  context: WaitUntilContext,
-  jobId: string,
-  graphql?: GraphqlRequest,
-) {
-  const work = processWebhookJob(jobId, graphql).then((ran) => {
-    console.log(
-      `[webhook-queue] Immediate job ${jobId}: ${ran ? "processed" : "skipped (not pending)"}`,
-    );
-  });
-
-  if (typeof context.waitUntil === "function") {
-    context.waitUntil(work);
-  } else {
-    void work;
-  }
-}
-
-export async function listWebhookJobs(
+export async function listWebhookFailures(
   shop: string,
   options?: {
-    status?: WebhookJobStatus;
-    handler?: WebhookJobHandler;
+    status?: WebhookFailureStatus;
+    handler?: WebhookFailureHandler;
     limit?: number;
   },
 ) {
-  return prisma.webhookJob.findMany({
+  return prisma.webhookFailure.findMany({
     where: {
       shop,
       ...(options?.status ? { status: options.status } : {}),

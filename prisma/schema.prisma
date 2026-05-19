@@ -70,39 +70,37 @@ model Customer {
   orders    Order[]
 }
 
-enum WebhookJobStatus {
+enum WebhookFailureStatus {
   pending
   processing
-  completed
-  skipped
   failed
 }
 
-enum WebhookJobHandler {
+enum WebhookFailureHandler {
   product_description_sync
   orders_create
 }
 
-/// Queue for async webhook processing (products, orders, etc.).
-model WebhookJob {
-  id              String            @id @default(cuid())
+/// Failed webhook work only — successes are not persisted (Supabase storage).
+model WebhookFailure {
+  id              String                @id @default(cuid())
   shop            String
-  handler         WebhookJobHandler
+  handler         WebhookFailureHandler
   topic           String
   resourceId      BigInt
   resourceGid     String?
   webhookId       String?
   payload         Json
-  status          WebhookJobStatus  @default(pending)
+  status          WebhookFailureStatus  @default(pending)
   outcome         String?
   errorCode       String?
-  errorMessage    String?           @db.Text
-  attempts        Int               @default(0)
-  maxAttempts     Int               @default(5)
+  errorMessage    String?               @db.Text
+  attempts        Int                   @default(0)
+  maxAttempts     Int                   @default(5)
   lastAttemptAt   DateTime?
   completedAt     DateTime?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
 
   @@unique([shop, handler, resourceId])
   @@index([status, createdAt])

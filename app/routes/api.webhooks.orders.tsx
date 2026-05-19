@@ -1,13 +1,12 @@
 import {
   WEBHOOK_HANDLERS,
-  enqueueWebhookJob,
-  enqueueWebhookJobNoSession,
-  scheduleImmediateWebhookJobProcessing,
+  processWebhookWork,
+  recordWebhookFailureNoSession,
 } from "../webhook-queue.server";
 import { authenticate } from "../shopify.server";
 import type { Route } from "./+types/api.webhooks.orders";
 
-export const action = async ({ request, context }: Route.ActionArgs) => {
+export const action = async ({ request }: Route.ActionArgs) => {
   const { topic, shop, session, admin, payload } =
     await authenticate.webhook(request);
 
@@ -37,17 +36,16 @@ export const action = async ({ request, context }: Route.ActionArgs) => {
       `[orders-webhook] No admin API context for ${shop}. ` +
         "Open the app once on this store so an offline session exists.",
     );
-    await enqueueWebhookJobNoSession(enqueueInput);
+    await recordWebhookFailureNoSession(enqueueInput);
     return new Response("No session for shop", { status: 200 });
   }
 
-  const job = await enqueueWebhookJob(enqueueInput);
   const graphql = admin.graphql.bind(admin);
+  const outcome = await processWebhookWork(enqueueInput, graphql);
 
-  const response = new Response("Webhook handled", { status: 200 });
-  scheduleImmediateWebhookJobProcessing(context, job.id, graphql);
+  console.log(
+    `[orders-webhook] Order ${orderId}: ${outcome} (failures persisted for cron)`,
+  );
 
-  console.log(`[orders-webhook] Enqueued job ${job.id} for order ${orderId}`);
-
-  return response;
+  return new Response("Webhook handled", { status: 200 });
 };

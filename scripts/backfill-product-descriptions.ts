@@ -1,3 +1,9 @@
+/**
+ * Bulk-sync product descriptionHtml from metafields for Shop-published products.
+ *
+ * Options: --dry-run, --limit N, --delay-ms N (default 250),
+ * --from N (resume at 1-based index), --max-retries N (default 5).
+ */
 import { neonConfig } from "@neondatabase/serverless";
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { ApiVersion, shopifyApi, type Session } from "@shopify/shopify-api";
@@ -5,8 +11,9 @@ import "@shopify/shopify-api/adapters/node";
 import "dotenv/config";
 import ws from "ws";
 import {
-  listAllProductGids,
+  listShopPublishedProductGids,
   syncProductDescription,
+  type DescriptionSyncResult,
   type GraphqlRequest,
 } from "../app/product-description.server";
 import { PrismaSessionStorage } from "../app/shopify-app-session-storage-prisma.js";
@@ -38,7 +45,60 @@ function parseArgs(argv: string[]) {
       const value = Number(argv[index + 1]);
       return Number.isFinite(value) && value >= 0 ? value : 250;
     })(),
+    from: (() => {
+      const index = argv.indexOf("--from");
+      if (index === -1) return 1;
+      const value = Number(argv[index + 1]);
+      return Number.isFinite(value) && value >= 1 ? value : 1;
+    })(),
+    maxRetries: (() => {
+      const index = argv.indexOf("--max-retries");
+      if (index === -1) return 5;
+      const value = Number(argv[index + 1]);
+      return Number.isFinite(value) && value >= 1 ? value : 5;
+    })(),
   };
+}
+
+function isRetriableShopifyError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const response = (error as { response?: { code?: number } }).response;
+  const code = response?.code;
+  if (code === 429 || code === 502 || code === 503) return true;
+  const name = (error as { constructor?: { name?: string } }).constructor?.name;
+  return (
+    name === "HttpInternalError" ||
+    name === "HttpThrottlingError" ||
+    name === "HttpMaxRetriesError"
+  );
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+async function syncWithRetries(
+  graphql: GraphqlRequest,
+  productGid: string,
+  options: { dryRun?: boolean; maxRetries: number },
+): Promise<DescriptionSyncResult> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= options.maxRetries; attempt++) {
+    try {
+      return await syncProductDescription(graphql, productGid, {
+        dryRun: options.dryRun,
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isRetriableShopifyError(error) || attempt === options.maxRetries) {
+        throw error;
+      }
+      const waitMs = Math.min(30_000, 1000 * 2 ** (attempt - 1));
+      await sleep(waitMs);
+    }
+  }
+  throw lastError;
 }
 
 function sleep(ms: number) {
@@ -49,7 +109,9 @@ async function main() {
   const shop = requireEnv("SHOP");
   const apiKey = requireEnv("SHOPIFY_API_KEY");
   const apiSecretKey = requireEnv("SHOPIFY_API_SECRET");
-  const { dryRun, limit, delayMs } = parseArgs(process.argv.slice(2));
+  const { dryRun, limit, delayMs, from, maxRetries } = parseArgs(
+    process.argv.slice(2),
+  );
 
   const adapter = new PrismaNeon({
     connectionString: requireEnv("DATABASE_URL"),
@@ -83,7 +145,10 @@ async function main() {
   const client = new shopify.clients.Graphql({ session });
 
   const graphql: GraphqlRequest = async (query, options) => {
-    const body = await client.request(query, options?.variables);
+    const body = await client.request(query, {
+      ...options,
+      retries: 3,
+    });
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -94,41 +159,60 @@ async function main() {
     `Backfill descriptions for ${shop}${dryRun ? " (dry run)" : ""}${limit ? `, limit ${limit}` : ""}…\n`,
   );
 
-  const products = await listAllProductGids(graphql);
+  console.log("Listing products published on Shop channel…\n");
+
+  const products = await listShopPublishedProductGids(graphql);
   const targets = limit ? products.slice(0, limit) : products;
 
+  const processing = from > 1 ? targets.slice(from - 1) : targets;
   console.log(
-    `Found ${products.length} product(s); processing ${targets.length}…\n`,
+    `Found ${products.length} Shop-published product(s); processing ${processing.length}` +
+      (from > 1 ? ` (from #${from})` : "") +
+      "…\n",
   );
 
   let updated = 0;
   let skipped = 0;
   let errors = 0;
 
-  for (const [index, product] of targets.entries()) {
-    const result = await syncProductDescription(graphql, product.id, {
-      dryRun,
-    });
-
+  for (const [offset, product] of processing.entries()) {
+    const position = from > 1 ? from + offset : offset + 1;
     const label = product.title || product.id;
+
+    let result: DescriptionSyncResult;
+    try {
+      result = await syncWithRetries(graphql, product.id, {
+        dryRun,
+        maxRetries,
+      });
+    } catch (error) {
+      errors += 1;
+      console.log(
+        `[${position}/${targets.length}] Error: ${label} — ${formatError(error)}`,
+      );
+      if (delayMs > 0 && offset < processing.length - 1) {
+        await sleep(delayMs);
+      }
+      continue;
+    }
     if (result.outcome === "updated") {
       updated += 1;
       console.log(
-        `[${index + 1}/${targets.length}] ${dryRun ? "Would update" : "Updated"}: ${label}`,
+        `[${position}/${targets.length}] ${dryRun ? "Would update" : "Updated"}: ${label}`,
       );
     } else if (result.outcome === "skipped") {
       skipped += 1;
       console.log(
-        `[${index + 1}/${targets.length}] Skipped (up to date): ${label}`,
+        `[${position}/${targets.length}] Skipped (up to date): ${label}`,
       );
     } else {
       errors += 1;
       console.log(
-        `[${index + 1}/${targets.length}] Error: ${label} — ${result.message}`,
+        `[${position}/${targets.length}] Error: ${label} — ${result.message}`,
       );
     }
 
-    if (delayMs > 0 && index < targets.length - 1) {
+    if (delayMs > 0 && offset < processing.length - 1) {
       await sleep(delayMs);
     }
   }
