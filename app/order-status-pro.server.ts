@@ -53,25 +53,25 @@ function toStatusChoices(statuses: StatusOption[]): StatusChoice[] {
     }));
 }
 
-function parseStatusObject(status: unknown): OspOrderStatus | null {
-  if (typeof status === "string" && status.trim()) {
-    return { code: status.trim() };
+/** StatusPro custom status objects include `code` (e.g. st0005RI) and often `is_set`. */
+function isOspStatusObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.is_set === true) return true;
+  if (typeof record.code === "string" && /^st[a-zA-Z0-9]+$/i.test(record.code)) {
+    return true;
   }
-  if (!status || typeof status !== "object") return null;
-  const record = status as {
-    code?: unknown;
-    name?: unknown;
-    public_name?: unknown;
-    status_code?: unknown;
-    status_name?: unknown;
-  };
+  return false;
+}
+
+function parseStatusObject(status: unknown): OspOrderStatus | null {
+  if (!isOspStatusObject(status)) return null;
+  const record = status;
   const code =
-    (typeof record.code === "string" ? record.code : undefined) ??
-    (typeof record.status_code === "string" ? record.status_code : undefined);
+    typeof record.code === "string" ? record.code : undefined;
   const name =
     (typeof record.name === "string" ? record.name : undefined) ??
-    (typeof record.public_name === "string" ? record.public_name : undefined) ??
-    (typeof record.status_name === "string" ? record.status_name : undefined);
+    (typeof record.public_name === "string" ? record.public_name : undefined);
   if (!code && !name) return null;
   return { code, name };
 }
@@ -82,18 +82,6 @@ function firstParsedStatus(...candidates: unknown[]): OspOrderStatus | null {
     if (parsed) return parsed;
   }
   return null;
-}
-
-function parseFlatStatusFields(
-  record: Record<string, unknown>,
-): OspOrderStatus | null {
-  const code = record.status_code ?? record.statusCode;
-  const name =
-    record.status_name ?? record.statusName ?? record.public_name;
-  const parsedCode = typeof code === "string" ? code : undefined;
-  const parsedName = typeof name === "string" ? name : undefined;
-  if (!parsedCode && !parsedName) return null;
-  return { code: parsedCode, name: parsedName };
 }
 
 function parseStatusChangeBlock(value: unknown): OspOrderStatus | null {
@@ -110,7 +98,7 @@ function parseStatusChangeBlock(value: unknown): OspOrderStatus | null {
 }
 
 function parseStatusFromOrder(order: Record<string, unknown>): OspOrderStatus | null {
-  const direct = firstParsedStatus(
+  return firstParsedStatus(
     order.status,
     order.new_status,
     order.newStatus,
@@ -118,22 +106,6 @@ function parseStatusFromOrder(order: Record<string, unknown>): OspOrderStatus | 
     order.current_status,
     order.order_status,
   );
-  if (direct) return direct;
-
-  const flat = parseFlatStatusFields(order);
-  if (flat) return flat;
-
-  for (const [key, value] of Object.entries(order)) {
-    if (!/status/i.test(key)) continue;
-    const parsed = parseStatusObject(value) ?? parseFlatStatusFields(
-      value && typeof value === "object"
-        ? (value as Record<string, unknown>)
-        : {},
-    );
-    if (parsed) return parsed;
-  }
-
-  return null;
 }
 
 function parseOrderId(value: unknown): bigint | null {
@@ -233,12 +205,28 @@ export function parseOspWebhookPayload(
       parseStatusChangeBlock(record.status_change),
       nestedData?.status,
       nestedData?.new_status,
-    ) ??
-    parseFlatStatusFields(record);
+    );
 
   if (!status) return null;
 
   return { orderId, status };
+}
+
+const WEBHOOK_LOG_CHUNK_SIZE = 400;
+
+/** Log full webhook body in parts (Netlify truncates single long lines). */
+export function logOspWebhookPayloadInChunks(rawBody: string): void {
+  const total = Math.max(1, Math.ceil(rawBody.length / WEBHOOK_LOG_CHUNK_SIZE));
+  console.log(
+    `[osp-webhook] payload length=${rawBody.length} parts=${total}`,
+  );
+  for (let i = 0; i < total; i++) {
+    const start = i * WEBHOOK_LOG_CHUNK_SIZE;
+    console.log(
+      `[osp-webhook] ${i + 1}/${total}:`,
+      rawBody.slice(start, start + WEBHOOK_LOG_CHUNK_SIZE),
+    );
+  }
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -253,25 +241,6 @@ function safeEqual(a: string, b: string): boolean {
  * Set ORDER_STATUS_PRO_WEBHOOK_TOKEN in env and register:
  *   https://<host>/api/webhooks/order-status-pro/<token>
  */
-const WEBHOOK_DEBUG_CHUNK_SIZE = 400;
-
-/** Netlify truncates long log lines; split payload when ORDER_STATUS_PRO_WEBHOOK_DEBUG=true. */
-export function logOspWebhookPayloadDebug(rawBody: string): void {
-  if (process.env.ORDER_STATUS_PRO_WEBHOOK_DEBUG !== "true") return;
-
-  const total = Math.max(1, Math.ceil(rawBody.length / WEBHOOK_DEBUG_CHUNK_SIZE));
-  console.log(
-    `[osp-webhook:debug] payload length=${rawBody.length} parts=${total}`,
-  );
-  for (let i = 0; i < total; i++) {
-    const start = i * WEBHOOK_DEBUG_CHUNK_SIZE;
-    console.log(
-      `[osp-webhook:debug] ${i + 1}/${total}:`,
-      rawBody.slice(start, start + WEBHOOK_DEBUG_CHUNK_SIZE),
-    );
-  }
-}
-
 export function verifyOspWebhookToken(urlToken: string | undefined): boolean {
   const expected = process.env.ORDER_STATUS_PRO_WEBHOOK_TOKEN?.trim();
   if (!expected) {

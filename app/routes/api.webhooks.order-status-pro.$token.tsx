@@ -1,6 +1,6 @@
 import {
   applyOrderStatusCache,
-  logOspWebhookPayloadDebug,
+  logOspWebhookPayloadInChunks,
   parseOspWebhookPayload,
   verifyOspWebhookToken,
 } from "../order-status-pro.server";
@@ -26,9 +26,10 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     return new Response("Bad request", { status: 400 });
   }
 
+  logOspWebhookPayloadInChunks(rawBody);
+
   const parsed = parseOspWebhookPayload(body);
   if (!parsed) {
-    logOspWebhookPayloadDebug(rawBody);
     const event =
       body && typeof body === "object" && "event" in body
         ? String((body as { event: unknown }).event)
@@ -51,7 +52,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const updated = await applyOrderStatusCache(parsed.orderId, parsed.status);
   if (updated) {
     console.log(
-      `[osp-webhook] cached order=${parsed.orderId} status=${parsed.status.code ?? parsed.status.name}`,
+      `[osp-webhook] cached order=${parsed.orderId} code=${parsed.status.code ?? "?"} name=${parsed.status.name ?? "?"}`,
     );
   }
 
