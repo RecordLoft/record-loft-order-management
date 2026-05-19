@@ -1,0 +1,55 @@
+name: Deploy to Netlify
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: netlify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      NODE_ENV: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install
+
+      - name: Generate Prisma client
+        run: yarn prisma generate
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+
+      - name: Run database migrations
+        run: yarn prisma migrate deploy
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+
+      - name: Build
+        run: yarn build
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+          SHOPIFY_APP_URL: ${{ secrets.SHOPIFY_APP_URL }}
+
+      - name: Deploy to Netlify
+        run: yarn dlx netlify-cli@latest deploy --prod --message "Deploy ${{ github.sha }}"
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
