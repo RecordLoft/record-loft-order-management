@@ -55,11 +55,30 @@ function toStatusChoices(statuses: StatusOption[]): StatusChoice[] {
 
 function parseStatusObject(status: unknown): OspOrderStatus | null {
   if (!status || typeof status !== "object") return null;
-  const record = status as { code?: unknown; name?: unknown };
-  const code = typeof record.code === "string" ? record.code : undefined;
-  const name = typeof record.name === "string" ? record.name : undefined;
+  const record = status as {
+    code?: unknown;
+    name?: unknown;
+    public_name?: unknown;
+    status_code?: unknown;
+    status_name?: unknown;
+  };
+  const code =
+    (typeof record.code === "string" ? record.code : undefined) ??
+    (typeof record.status_code === "string" ? record.status_code : undefined);
+  const name =
+    (typeof record.name === "string" ? record.name : undefined) ??
+    (typeof record.public_name === "string" ? record.public_name : undefined) ??
+    (typeof record.status_name === "string" ? record.status_name : undefined);
   if (!code && !name) return null;
   return { code, name };
+}
+
+function firstParsedStatus(...candidates: unknown[]): OspOrderStatus | null {
+  for (const candidate of candidates) {
+    const parsed = parseStatusObject(candidate);
+    if (parsed) return parsed;
+  }
+  return null;
 }
 
 function parseOrderId(value: unknown): bigint | null {
@@ -131,19 +150,36 @@ export function parseOspWebhookPayload(
       ? (record.order as Record<string, unknown>)
       : null;
 
+  const nestedData =
+    record.data && typeof record.data === "object"
+      ? (record.data as Record<string, unknown>)
+      : null;
+
   const orderId =
     parseOrderId(record.order_id) ??
     parseOrderId(record.orderId) ??
     parseOrderId(nestedOrder?.id) ??
+    parseOrderId(nestedData?.order_id) ??
+    parseOrderId(nestedData?.id) ??
     parseOrderId(record.id);
 
   if (orderId == null) return null;
 
-  const status =
-    parseStatusObject(record.status) ??
-    parseStatusObject(nestedOrder?.status) ??
-    parseStatusObject(record.new_status) ??
-    parseStatusObject(record.newStatus);
+  const status = firstParsedStatus(
+    record.status,
+    record.new_status,
+    record.newStatus,
+    record.to_status,
+    record.toStatus,
+    record.current_status,
+    record.order_status,
+    nestedOrder?.status,
+    nestedOrder?.new_status,
+    nestedOrder?.to_status,
+    nestedOrder?.order_status,
+    nestedData?.status,
+    nestedData?.new_status,
+  );
 
   if (!status) return null;
 

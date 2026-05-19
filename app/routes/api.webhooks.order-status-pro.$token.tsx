@@ -27,7 +27,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 
   const parsed = parseOspWebhookPayload(body);
   if (!parsed) {
-    console.warn("[osp-webhook] Unrecognized payload:", rawBody.slice(0, 500));
+    const event =
+      body && typeof body === "object" && "event" in body
+        ? String((body as { event: unknown }).event)
+        : "unknown";
+    console.warn(
+      `[osp-webhook] Unrecognized payload (event=${event}):`,
+      rawBody.slice(0, 800),
+    );
     return new Response("Webhook handled", { status: 200 });
   }
 
