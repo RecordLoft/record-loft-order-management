@@ -1,4 +1,4 @@
-import { fetchStatusChoices } from "app/order-status-pro.server";
+import { fetchStatusChoices } from "../order-status-pro.server";
 import type { LoaderFunctionArgs } from "react-router";
 
 /** Record Planet uses the same status list for every order (GET /statuses). */

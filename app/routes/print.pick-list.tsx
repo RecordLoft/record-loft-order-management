@@ -1,5 +1,5 @@
 import { BlockStack, Box, Card, Divider, Text } from "@shopify/polaris";
-import { prisma } from "app/db.server";
+import { prisma } from "../db.server";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 export const loader = async ({ request }: LoaderFunctionArgs) => {

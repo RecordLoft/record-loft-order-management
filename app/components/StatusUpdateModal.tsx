@@ -1,7 +1,7 @@
 import { Banner, BlockStack, ChoiceList, Modal } from "@shopify/polaris";
 import { useCallback, useEffect, useState } from "react";
 import type { FetcherWithComponents } from "react-router";
-import type { StatusChoice } from "app/order-status-pro.server";
+import type { StatusChoice } from "../order-status-pro.server";
 
 interface StatusUpdateModalProps {
 	open: boolean;

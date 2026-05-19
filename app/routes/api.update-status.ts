@@ -1,7 +1,7 @@
 import {
   bulkUpdateOrderStatus,
   RateLimitError,
-} from "app/order-status-pro.server";
+} from "../order-status-pro.server";
 import type { ActionFunctionArgs } from "react-router";
 
 function parseOrderIds(idsRaw: string): bigint[] {

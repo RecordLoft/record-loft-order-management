@@ -13,19 +13,19 @@ import {
   TextField,
 } from "@shopify/polaris";
 import { SearchIcon } from "@shopify/polaris-icons";
-import { StatusUpdateModal } from "app/components/StatusUpdateModal";
+import { StatusUpdateModal } from "../components/StatusUpdateModal";
 import {
   backfillMissingOrderStatuses,
   fetchStatusChoices,
   orderStatusFromRow,
-} from "app/order-status-pro.server";
+} from "../order-status-pro.server";
 import {
   filterRecordPlanetOrdersForSearch,
   getRecordPlanetSearchMatch,
   parseProperties,
   recordPlanetOrderWhere,
   type GloboProperties,
-} from "app/record-planet.server";
+} from "../record-planet.server";
 import { useEffect, useMemo, useState } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import {
