@@ -42,8 +42,26 @@ export type ProcessWebhookFailuresOptions = {
   graphql?: GraphqlRequest;
 };
 
-function formatError(error: unknown): string {
+const ERROR_MESSAGE_MAX_LENGTH = 2000;
+
+/** Shopify admin graphql may throw Response (not Error) via handleClientError. */
+async function formatError(error: unknown): Promise<string> {
   if (error instanceof Error) return error.message;
+  if (error instanceof Response) {
+    let body = "";
+    try {
+      body = await error.text();
+    } catch {
+      body = "(could not read response body)";
+    }
+    const trimmed = body.trim();
+    const summary =
+      trimmed.length > 0
+        ? trimmed.slice(0, ERROR_MESSAGE_MAX_LENGTH)
+        : "(empty body)";
+    const statusText = error.statusText ? ` ${error.statusText}` : "";
+    return `HTTP ${error.status}${statusText}: ${summary}`;
+  }
   return String(error);
 }
 
@@ -58,7 +76,7 @@ async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
   } catch (error) {
     console.error(
       `[webhook-queue] No admin session for ${shop}:`,
-      formatError(error),
+      await formatError(error),
     );
     return null;
   }
@@ -262,7 +280,7 @@ export async function processWebhookWork(
     await recordFailureFromWork(
       input,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
-      formatError(error),
+      await formatError(error),
       null,
       1,
       5,
@@ -335,7 +353,7 @@ export async function processWebhookFailure(
     await recordFailureFromWork(
       work,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
-      formatError(error),
+      await formatError(error),
       null,
       row.attempts,
       row.maxAttempts,
