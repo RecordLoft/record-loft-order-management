@@ -1,52 +1,55 @@
-import { Banner, BlockStack, Box, ChoiceList, Modal, SkeletonBodyText } from "@shopify/polaris";
+import { Banner, BlockStack, ChoiceList, Modal } from "@shopify/polaris";
 import { useCallback, useEffect, useState } from "react";
 import type { FetcherWithComponents } from "react-router";
+import type { StatusChoice } from "app/order-status-pro.server";
 
 interface StatusUpdateModalProps {
 	open: boolean;
 	onClose: () => void;
 	selectedIds: string[];
+	statusChoices: StatusChoice[];
 	fetcher: FetcherWithComponents<any>;
+	onSuccess?: () => void;
 }
 
-export function StatusUpdateModal({ open, onClose, selectedIds, fetcher }: StatusUpdateModalProps) {
+export function StatusUpdateModal({
+	open,
+	onClose,
+	selectedIds,
+	statusChoices,
+	fetcher,
+	onSuccess,
+}: StatusUpdateModalProps) {
 	const [newStatus, setNewStatus] = useState<string[]>([]);
-	const [viableStatuses, setViableStatuses] = useState<{ label: string; value: string }[]>([]);
-	const [isLoading, setIsLoading] = useState(false);
 
 	const isOverLimit = selectedIds.length > 50;
 
 	useEffect(() => {
-		if (open && selectedIds.length > 0 && !isOverLimit) {
-			setIsLoading(true);
-			const targetId = selectedIds[0].split("/").pop();
-
-			fetch(`/api/viable-statuses?id=${targetId}`)
-				.then((res) => res.json())
-				.then((data) => {
-					setViableStatuses(data);
-					setIsLoading(false);
-				})
-				.catch(() => setIsLoading(false));
+		if (!open) {
+			setNewStatus([]);
 		}
-	}, [open, selectedIds, isOverLimit]);
+	}, [open]);
 
 	const handleAction = useCallback(() => {
+		const statusCode = newStatus[0];
+		const statusLabel = statusChoices.find((s) => s.value === statusCode)?.label;
 		fetcher.submit(
 			{
-				ids: selectedIds.join(','),
-				status_code: newStatus[0], // Updated key to match API
+				ids: selectedIds.join(","),
+				status_code: statusCode,
+				status_name: statusLabel ?? statusCode,
 			},
-			{ method: "POST", action: "/api/update-status" }
+			{ method: "POST", action: "/api/update-status" },
 		);
-	}, [selectedIds, newStatus, fetcher]);
+	}, [selectedIds, newStatus, statusChoices, fetcher]);
 
 	useEffect(() => {
 		if (fetcher.state === "idle" && fetcher.data?.success) {
 			setNewStatus([]);
+			onSuccess?.();
 			onClose();
 		}
-	}, [fetcher.state, fetcher.data, onClose]);
+	}, [fetcher.state, fetcher.data, onClose, onSuccess]);
 
 	return (
 		<Modal
@@ -56,7 +59,7 @@ export function StatusUpdateModal({ open, onClose, selectedIds, fetcher }: Statu
 			primaryAction={{
 				content: "Update Status",
 				onAction: handleAction,
-				disabled: newStatus.length === 0 || isLoading || isOverLimit,
+				disabled: newStatus.length === 0 || isOverLimit || statusChoices.length === 0,
 				loading: fetcher.state !== "idle",
 			}}
 			secondaryActions={[{ content: "Cancel", onAction: onClose }]}
@@ -81,14 +84,14 @@ export function StatusUpdateModal({ open, onClose, selectedIds, fetcher }: Statu
 								</Banner>
 							)}
 
-							{isLoading ? (
-								<Box paddingBlockStart="200">
-									<SkeletonBodyText lines={3} />
-								</Box>
+							{statusChoices.length === 0 ? (
+								<Banner tone="warning">
+									<p>No statuses are configured in Order Status Pro.</p>
+								</Banner>
 							) : (
 								<ChoiceList
 									title="Select new status"
-									choices={viableStatuses}
+									choices={statusChoices}
 									selected={newStatus}
 									onChange={(value) => setNewStatus(value)}
 								/>

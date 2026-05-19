@@ -1,44 +1,73 @@
+import {
+  bulkUpdateOrderStatus,
+  RateLimitError,
+} from "app/order-status-pro.server";
 import type { ActionFunctionArgs } from "react-router";
+
+function parseOrderIds(idsRaw: string): bigint[] {
+  return idsRaw
+    .split(",")
+    .map((raw) => raw.trim())
+    .map((id) => {
+      const segment = id.split("/").pop() || id;
+      try {
+        return BigInt(segment);
+      } catch {
+        return null;
+      }
+    })
+    .filter((id): id is bigint => id !== null);
+}
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
-  const idsRaw = formData.get("ids") as string;
+  const idsRaw = formData.get("ids");
   const statusCode = formData.get("status_code");
+  const statusName = formData.get("status_name");
 
-  const orderIds = idsRaw
-    .split(",")
-    .map((id) => parseInt(id.split("/").pop() || "", 10))
-    .filter((id) => !isNaN(id));
+  if (typeof idsRaw !== "string" || !idsRaw.trim()) {
+    return Response.json(
+      { success: false, error: "No orders selected" },
+      { status: 400 },
+    );
+  }
+
+  if (typeof statusCode !== "string" || !statusCode) {
+    return Response.json(
+      { success: false, error: "Status is required" },
+      { status: 400 },
+    );
+  }
+
+  const orderIds = parseOrderIds(idsRaw);
+  if (orderIds.length === 0) {
+    return Response.json(
+      { success: false, error: "No valid order IDs" },
+      { status: 400 },
+    );
+  }
 
   try {
-    const response = await fetch(
-      "https://app.orderstatuspro.com/api/v1/orders/bulk-status",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.ORDER_STATUS_PRO_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          order_ids: orderIds,
-          status_code: statusCode,
-        }),
-      },
+    await bulkUpdateOrderStatus(
+      orderIds,
+      statusCode,
+      typeof statusName === "string" && statusName ? statusName : undefined,
     );
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || "Bulk update failed");
+    return { success: true };
+  } catch (error: unknown) {
+    if (error instanceof RateLimitError) {
+      return Response.json(
+        {
+          success: false,
+          error:
+            "Order Status Pro rate limit reached. Wait about 10 seconds and try again.",
+        },
+        { status: 429 },
+      );
     }
 
-    return { success: true };
-  } catch (error: any) {
-    return new Response(
-      JSON.stringify({ success: false, error: error.message }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    const message =
+      error instanceof Error ? error.message : "Bulk update failed";
+    return Response.json({ success: false, error: message }, { status: 500 });
   }
 };

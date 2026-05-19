@@ -44,6 +44,9 @@ model Order {
   customerId   BigInt?   // Must match Customer.id type
   lineItems    LineItem[]
   deliveryMethod String?
+  ospStatusCode     String?
+  ospStatusName     String?
+  ospStatusSyncedAt DateTime?
 }
 
 model LineItem {

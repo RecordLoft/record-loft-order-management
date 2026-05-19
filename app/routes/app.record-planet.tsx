@@ -15,6 +15,11 @@ import {
 import { SearchIcon } from "@shopify/polaris-icons";
 import { StatusUpdateModal } from "app/components/StatusUpdateModal";
 import {
+  backfillMissingOrderStatuses,
+  fetchStatusChoices,
+  orderStatusFromRow,
+} from "app/order-status-pro.server";
+import {
   filterRecordPlanetOrdersForSearch,
   getRecordPlanetSearchMatch,
   parseProperties,
@@ -23,7 +28,13 @@ import {
 } from "app/record-planet.server";
 import { useEffect, useMemo, useState } from "react";
 import type { LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useNavigation, useSearchParams } from "react-router";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigation,
+  useRevalidator,
+  useSearchParams,
+} from "react-router";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -177,42 +188,54 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? filterRecordPlanetOrdersForSearch(ordersRaw, searchMatch)
     : ordersRaw;
 
-  const ordersWithStatus = await Promise.all(
-    ordersFiltered.map(async (order) => {
-      try {
-        const response = await fetch(
-          `https://app.orderstatuspro.com/api/v1/orders/${order.id}`,
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.ORDER_STATUS_PRO_API_KEY}`,
-              "Content-Type": "application/json",
-            },
+  const uncachedOrderIds = ordersFiltered
+    .filter((order) => !order.ospStatusSyncedAt)
+    .map((order) => order.id);
+
+  const statusChoices = await fetchStatusChoices().catch((error) => {
+    console.error("[record-planet] Failed to load status choices:", error);
+    return [];
+  });
+
+  if (uncachedOrderIds.length > 0) {
+    await backfillMissingOrderStatuses(uncachedOrderIds).catch((error) => {
+      console.error("[record-planet] Failed to backfill order statuses:", error);
+    });
+  }
+
+  const refreshedStatusRows =
+    uncachedOrderIds.length > 0
+      ? await prisma.order.findMany({
+          where: { id: { in: uncachedOrderIds } },
+          select: {
+            id: true,
+            ospStatusCode: true,
+            ospStatusName: true,
+            ospStatusSyncedAt: true,
           },
-        );
+        })
+      : [];
 
-        const statusData = response.ok ? await response.json() : null;
-
-        return {
-          ...order,
-          status: statusData?.status || "Unknown",
-        };
-      } catch {
-        return { ...order, status: "Error" };
-      }
-    }),
+  const statusById = new Map(
+    refreshedStatusRows.map((row) => [row.id.toString(), row]),
   );
 
-  const serializedOrders: SerializedOrder[] = ordersWithStatus.map((order) => ({
+  const ordersForDisplay = ordersFiltered.map((order) => {
+    const fresh = statusById.get(order.id.toString());
+    return fresh ? { ...order, ...fresh } : order;
+  });
+
+  const serializedOrders: SerializedOrder[] = ordersForDisplay.map((order) => ({
     id: order.id.toString(),
     orderNumber: order.orderNumber,
     createdAt: order.createdAt.toISOString(),
     customerId: order.customerId?.toString() ?? null,
     product: serializeProduct(order.lineItems[0]),
-    status: order.status,
+    status: orderStatusFromRow(order),
   }));
 
   const customers: Record<string, SerializedCustomer> = {};
-  for (const order of ordersWithStatus) {
+  for (const order of ordersForDisplay) {
     if (order.customer) {
       customers[order.customer.id.toString()] = {
         id: order.customer.id.toString(),
@@ -232,14 +255,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     customerGroups,
     totalOrders,
     shop: session.shop,
+    statusChoices,
   };
 };
 
 export default function RecordPlanetOrders() {
-  const { searchQuery, customerGroups, totalOrders, shop } =
+  const { searchQuery, customerGroups, totalOrders, shop, statusChoices } =
     useLoaderData<typeof loader>();
 
   const fetcher = useFetcher();
+  const revalidator = useRevalidator();
   const navigation = useNavigation();
   const [, setSearchParams] = useSearchParams();
 
@@ -453,7 +478,12 @@ export default function RecordPlanetOrders() {
         open={showStatusModal}
         onClose={() => setShowStatusModal(false)}
         selectedIds={targetIds}
+        statusChoices={statusChoices}
         fetcher={fetcher}
+        onSuccess={() => {
+          revalidator.revalidate();
+          setSelectedOrderIds([]);
+        }}
       />
     </Page>
   );
