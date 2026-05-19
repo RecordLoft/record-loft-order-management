@@ -14,11 +14,7 @@ import {
 } from "@shopify/polaris";
 import { SearchIcon } from "@shopify/polaris-icons";
 import { StatusUpdateModal } from "../components/StatusUpdateModal";
-import {
-  backfillMissingOrderStatuses,
-  fetchStatusChoices,
-  orderStatusFromRow,
-} from "../order-status-pro.server";
+import { orderStatusFromRow } from "../order-status-pro.server";
 import {
   filterRecordPlanetOrdersForSearch,
   getRecordPlanetSearchMatch,
@@ -188,44 +184,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? filterRecordPlanetOrdersForSearch(ordersRaw, searchMatch)
     : ordersRaw;
 
-  const uncachedOrderIds = ordersFiltered
-    .filter((order) => !order.ospStatusSyncedAt)
-    .map((order) => order.id);
-
-  const statusChoices = await fetchStatusChoices().catch((error) => {
-    console.error("[record-planet] Failed to load status choices:", error);
-    return [];
-  });
-
-  if (uncachedOrderIds.length > 0) {
-    await backfillMissingOrderStatuses(uncachedOrderIds).catch((error) => {
-      console.error("[record-planet] Failed to backfill order statuses:", error);
-    });
-  }
-
-  const refreshedStatusRows =
-    uncachedOrderIds.length > 0
-      ? await prisma.order.findMany({
-          where: { id: { in: uncachedOrderIds } },
-          select: {
-            id: true,
-            ospStatusCode: true,
-            ospStatusName: true,
-            ospStatusSyncedAt: true,
-          },
-        })
-      : [];
-
-  const statusById = new Map(
-    refreshedStatusRows.map((row) => [row.id.toString(), row]),
-  );
-
-  const ordersForDisplay = ordersFiltered.map((order) => {
-    const fresh = statusById.get(order.id.toString());
-    return fresh ? { ...order, ...fresh } : order;
-  });
-
-  const serializedOrders: SerializedOrder[] = ordersForDisplay.map((order) => ({
+  const serializedOrders: SerializedOrder[] = ordersFiltered.map((order) => ({
     id: order.id.toString(),
     orderNumber: order.orderNumber,
     createdAt: order.createdAt.toISOString(),
@@ -235,7 +194,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }));
 
   const customers: Record<string, SerializedCustomer> = {};
-  for (const order of ordersForDisplay) {
+  for (const order of ordersFiltered) {
     if (order.customer) {
       customers[order.customer.id.toString()] = {
         id: order.customer.id.toString(),
@@ -255,12 +214,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     customerGroups,
     totalOrders,
     shop: session.shop,
-    statusChoices,
   };
 };
 
 export default function RecordPlanetOrders() {
-  const { searchQuery, customerGroups, totalOrders, shop, statusChoices } =
+  const { searchQuery, customerGroups, totalOrders, shop } =
     useLoaderData<typeof loader>();
 
   const fetcher = useFetcher();
@@ -478,7 +436,6 @@ export default function RecordPlanetOrders() {
         open={showStatusModal}
         onClose={() => setShowStatusModal(false)}
         selectedIds={targetIds}
-        statusChoices={statusChoices}
         fetcher={fetcher}
         onSuccess={() => {
           revalidator.revalidate();

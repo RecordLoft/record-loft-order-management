@@ -1,5 +1,12 @@
-import { Banner, BlockStack, ChoiceList, Modal } from "@shopify/polaris";
-import { useCallback, useEffect, useState } from "react";
+import {
+	Banner,
+	BlockStack,
+	Box,
+	ChoiceList,
+	Modal,
+	SkeletonBodyText,
+} from "@shopify/polaris";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FetcherWithComponents } from "react-router";
 import type { StatusChoice } from "../order-status-pro.server";
 
@@ -7,7 +14,6 @@ interface StatusUpdateModalProps {
 	open: boolean;
 	onClose: () => void;
 	selectedIds: string[];
-	statusChoices: StatusChoice[];
 	fetcher: FetcherWithComponents<any>;
 	onSuccess?: () => void;
 }
@@ -16,32 +22,60 @@ export function StatusUpdateModal({
 	open,
 	onClose,
 	selectedIds,
-	statusChoices,
 	fetcher,
 	onSuccess,
 }: StatusUpdateModalProps) {
 	const [newStatus, setNewStatus] = useState<string[]>([]);
+	const [statusChoices, setStatusChoices] = useState<StatusChoice[]>([]);
+	const [isLoadingChoices, setIsLoadingChoices] = useState(false);
+	const [choicesError, setChoicesError] = useState<string | null>(null);
+	const choicesFetched = useRef(false);
 
 	const isOverLimit = selectedIds.length > 50;
 
 	useEffect(() => {
 		if (!open) {
 			setNewStatus([]);
+			return;
 		}
-	}, [open]);
+
+		if (choicesFetched.current || isOverLimit) return;
+
+		choicesFetched.current = true;
+		setIsLoadingChoices(true);
+		setChoicesError(null);
+
+		fetch("/api/viable-statuses")
+			.then(async (res) => {
+				const data = await res.json();
+				if (!res.ok) {
+					throw new Error(
+						typeof data?.error === "string" ? data.error : "Could not load statuses",
+					);
+				}
+				if (!Array.isArray(data)) {
+					throw new Error("Unexpected response from status API");
+				}
+				setStatusChoices(data);
+			})
+			.catch((error: unknown) => {
+				choicesFetched.current = false;
+				setChoicesError(
+					error instanceof Error ? error.message : "Could not load statuses",
+				);
+			})
+			.finally(() => setIsLoadingChoices(false));
+	}, [open, isOverLimit]);
 
 	const handleAction = useCallback(() => {
-		const statusCode = newStatus[0];
-		const statusLabel = statusChoices.find((s) => s.value === statusCode)?.label;
 		fetcher.submit(
 			{
 				ids: selectedIds.join(","),
-				status_code: statusCode,
-				status_name: statusLabel ?? statusCode,
+				status_code: newStatus[0],
 			},
 			{ method: "POST", action: "/api/update-status" },
 		);
-	}, [selectedIds, newStatus, statusChoices, fetcher]);
+	}, [selectedIds, newStatus, fetcher]);
 
 	useEffect(() => {
 		if (fetcher.state === "idle" && fetcher.data?.success) {
@@ -51,6 +85,8 @@ export function StatusUpdateModal({
 		}
 	}, [fetcher.state, fetcher.data, onClose, onSuccess]);
 
+	const choicesReady = statusChoices.length > 0;
+
 	return (
 		<Modal
 			open={open}
@@ -59,7 +95,11 @@ export function StatusUpdateModal({
 			primaryAction={{
 				content: "Update Status",
 				onAction: handleAction,
-				disabled: newStatus.length === 0 || isOverLimit || statusChoices.length === 0,
+				disabled:
+					newStatus.length === 0 ||
+					isOverLimit ||
+					isLoadingChoices ||
+					!choicesReady,
 				loading: fetcher.state !== "idle",
 			}}
 			secondaryActions={[{ content: "Cancel", onAction: onClose }]}
@@ -84,17 +124,29 @@ export function StatusUpdateModal({
 								</Banner>
 							)}
 
-							{statusChoices.length === 0 ? (
+							{choicesError && (
+								<Banner tone="critical">
+									<p>{choicesError}</p>
+								</Banner>
+							)}
+
+							{isLoadingChoices ? (
+								<Box paddingBlockStart="200">
+									<SkeletonBodyText lines={3} />
+								</Box>
+							) : !choicesError && !choicesReady ? (
 								<Banner tone="warning">
 									<p>No statuses are configured in Order Status Pro.</p>
 								</Banner>
 							) : (
-								<ChoiceList
-									title="Select new status"
-									choices={statusChoices}
-									selected={newStatus}
-									onChange={(value) => setNewStatus(value)}
-								/>
+								choicesReady && (
+									<ChoiceList
+										title="Select new status"
+										choices={statusChoices}
+										selected={newStatus}
+										onChange={(value) => setNewStatus(value)}
+									/>
+								)
 							)}
 						</>
 					)}

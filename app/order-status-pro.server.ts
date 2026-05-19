@@ -44,16 +44,6 @@ export type StatusChoice = { label: string; value: string };
 
 type StatusOption = { name?: string; code?: string };
 
-type OspOrdersListItem = {
-  id?: number | string;
-  status?: { code?: string; name?: string };
-};
-
-type OspOrdersListResponse = {
-  data?: OspOrdersListItem[];
-  meta?: { last_page?: number };
-};
-
 function toStatusChoices(statuses: StatusOption[]): StatusChoice[] {
   return statuses
     .filter((status) => status.name && status.code)
@@ -72,10 +62,6 @@ function parseStatusObject(status: unknown): OspOrderStatus | null {
   return { code, name };
 }
 
-function parseListOrderStatus(item: OspOrdersListItem): OspOrderStatus | null {
-  return parseStatusObject(item.status);
-}
-
 function parseOrderId(value: unknown): bigint | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return BigInt(Math.trunc(value));
@@ -90,7 +76,7 @@ function parseOrderId(value: unknown): bigint | null {
   return null;
 }
 
-/** All configured statuses — same options for every Record Planet order. */
+/** GET /statuses — same options for every Record Planet order. */
 export async function fetchStatusChoices(): Promise<StatusChoice[]> {
   const response = await fetchOrderStatusPro("/statuses");
   if (!response.ok) {
@@ -118,14 +104,7 @@ export function orderStatusFromRow(order: {
   return "Unknown";
 }
 
-export function formatOrderStatus(
-  status: OspOrderStatus | null | undefined,
-): { name?: string } | string {
-  if (!status?.name && !status?.code) return "Unknown";
-  if (status.name) return { name: status.name };
-  return status.code!;
-}
-
+/** Webhook-only cache writes. */
 export async function applyOrderStatusCache(
   orderId: bigint,
   status: OspOrderStatus,
@@ -211,70 +190,9 @@ export async function fetchOrderStatusPro(
   });
 }
 
-/** Backfill cache for orders missing ospStatusSyncedAt (e.g. before webhooks existed). */
-export async function backfillMissingOrderStatuses(
-  orderIds: bigint[],
-): Promise<void> {
-  const missing = orderIds.filter(Boolean);
-  if (missing.length === 0) return;
-
-  const statuses = await fetchOrderStatusesByIds(missing);
-  for (const [id, status] of statuses) {
-    await applyOrderStatusCache(BigInt(id), status);
-  }
-}
-
-/**
- * Paginated GET /orders — used only to backfill missing cache entries.
- */
-export async function fetchOrderStatusesByIds(
-  orderIds: bigint[],
-): Promise<Map<string, OspOrderStatus>> {
-  if (orderIds.length === 0) return new Map();
-
-  const needed = new Set(orderIds.map((id) => id.toString()));
-  const found = new Map<string, OspOrderStatus>();
-
-  let page = 1;
-  let lastPage = 1;
-
-  while (page <= lastPage && found.size < needed.size) {
-    const response = await fetchOrderStatusPro(
-      `/orders?page_size=100&page=${page}`,
-    );
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(
-        `OrderStatusPro orders list error: ${response.status} - ${errorText}`,
-      );
-      break;
-    }
-
-    const body = (await response.json()) as OspOrdersListResponse;
-    const rows = Array.isArray(body.data) ? body.data : [];
-
-    for (const row of rows) {
-      if (row.id == null) continue;
-      const id = String(row.id);
-      if (!needed.has(id)) continue;
-      const status = parseListOrderStatus(row);
-      if (status) found.set(id, status);
-    }
-
-    lastPage =
-      typeof body.meta?.last_page === "number" && body.meta.last_page > 0
-        ? body.meta.last_page
-        : 1;
-    page += 1;
-  }
-
-  return found;
-}
-
 export async function bulkUpdateOrderStatus(
   orderIds: bigint[],
   statusCode: string,
-  statusName?: string,
 ): Promise<void> {
   const response = await fetchOrderStatusPro("/orders/bulk-status", {
     method: "POST",
@@ -300,14 +218,6 @@ export async function bulkUpdateOrderStatus(
     }
     throw new Error(message);
   }
-
-  const cached: OspOrderStatus = {
-    code: statusCode,
-    name: statusName ?? statusCode,
-  };
-  await Promise.all(
-    orderIds.map((orderId) => applyOrderStatusCache(orderId, cached)),
-  );
 }
 
 export class RateLimitError extends Error {

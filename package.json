@@ -18,8 +18,7 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
-    "retry:webhooks": "prisma generate && node --import tsx scripts/retry-webhook-jobs.ts",
-    "backfill:order-statuses": "prisma generate && node --import tsx scripts/backfill-order-statuses.ts"
+    "retry:webhooks": "prisma generate && node --import tsx scripts/retry-webhook-jobs.ts"
   },
   "type": "module",
   "engines": {

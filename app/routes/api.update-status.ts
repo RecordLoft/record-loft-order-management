@@ -23,7 +23,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const idsRaw = formData.get("ids");
   const statusCode = formData.get("status_code");
-  const statusName = formData.get("status_name");
 
   if (typeof idsRaw !== "string" || !idsRaw.trim()) {
     return Response.json(
@@ -48,11 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   try {
-    await bulkUpdateOrderStatus(
-      orderIds,
-      statusCode,
-      typeof statusName === "string" && statusName ? statusName : undefined,
-    );
+    await bulkUpdateOrderStatus(orderIds, statusCode);
     return { success: true };
   } catch (error: unknown) {
     if (error instanceof RateLimitError) {
