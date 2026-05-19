@@ -38,7 +38,8 @@ export function StatusUpdateModal({
 	const pendingSyncRef = useRef<{ ids: string[]; statusName: string } | null>(
 		null,
 	);
-	const handledSuccessRef = useRef(false);
+	const pollGenerationRef = useRef(0);
+	const wasSubmittingRef = useRef(false);
 	const onSuccessRef = useRef(onSuccess);
 	const onCloseRef = useRef(onClose);
 
@@ -48,14 +49,19 @@ export function StatusUpdateModal({
 	const isOverLimit = selectedIds.length > 50;
 	const representativeOrderId = selectedIds[0] ?? null;
 
+	const stopPolling = useCallback(() => {
+		pollGenerationRef.current += 1;
+	}, []);
+
 	useEffect(() => {
 		if (!open) {
 			setNewStatus([]);
 			setIsWaitingForWebhook(false);
 			setSyncError(null);
 			pendingSyncRef.current = null;
-			handledSuccessRef.current = false;
+			wasSubmittingRef.current = false;
 			choicesFetchedForOrder.current = null;
+			stopPolling();
 			return;
 		}
 
@@ -88,17 +94,18 @@ export function StatusUpdateModal({
 				);
 			})
 			.finally(() => setIsLoadingChoices(false));
-	}, [open, isOverLimit, representativeOrderId]);
+	}, [open, isOverLimit, representativeOrderId, stopPolling]);
 
 	const handleAction = useCallback(() => {
 		const statusCode = newStatus[0];
 		const statusLabel = statusChoices.find((s) => s.value === statusCode)?.label;
+		stopPolling();
 		pendingSyncRef.current = {
 			ids: selectedIds,
 			statusName: statusLabel ?? statusCode,
 		};
-		handledSuccessRef.current = false;
 		setSyncError(null);
+		wasSubmittingRef.current = true;
 		fetcher.submit(
 			{
 				ids: selectedIds.join(","),
@@ -106,30 +113,37 @@ export function StatusUpdateModal({
 			},
 			{ method: "POST", action: "/api/update-status" },
 		);
-	}, [selectedIds, newStatus, statusChoices, fetcher]);
+	}, [selectedIds, newStatus, statusChoices, fetcher, stopPolling]);
 
 	useEffect(() => {
-		if (fetcher.state !== "idle" || !fetcher.data?.success) return;
-		if (handledSuccessRef.current) return;
+		if (fetcher.state === "submitting" || fetcher.state === "loading") {
+			wasSubmittingRef.current = true;
+			return;
+		}
+		if (fetcher.state !== "idle" || !wasSubmittingRef.current) return;
+		wasSubmittingRef.current = false;
 
 		const pending = pendingSyncRef.current;
-		if (!pending) return;
+		const syncedAfter =
+			typeof fetcher.data?.syncedAfter === "string"
+				? fetcher.data.syncedAfter
+				: null;
 
-		handledSuccessRef.current = true;
+		if (!fetcher.data?.success || !pending || !syncedAfter) return;
+
+		const generation = ++pollGenerationRef.current;
 		setIsWaitingForWebhook(true);
 
 		const params = new URLSearchParams({
 			ids: pending.ids.join(","),
+			since: syncedAfter,
 			status_name: pending.statusName,
 		});
 		const startedAt = Date.now();
-		let cancelled = false;
-		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (error?: string) => {
-			if (cancelled) return;
-			cancelled = true;
-			if (pollTimer) clearTimeout(pollTimer);
+			if (pollGenerationRef.current !== generation) return;
+			stopPolling();
 			pendingSyncRef.current = null;
 			setIsWaitingForWebhook(false);
 			if (error) {
@@ -142,7 +156,7 @@ export function StatusUpdateModal({
 		};
 
 		const poll = async () => {
-			if (cancelled) return;
+			if (pollGenerationRef.current !== generation) return;
 
 			if (Date.now() - startedAt > SYNC_TIMEOUT_MS) {
 				finish("Status did not sync from Order Status Pro in time.");
@@ -161,33 +175,23 @@ export function StatusUpdateModal({
 					return;
 				}
 
-				if (!res.ok) {
-					pollTimer = setTimeout(() => {
-						void poll();
-					}, SYNC_POLL_MS);
-					return;
-				}
-
-				if (data.synced) {
+				if (res.ok && data.synced) {
 					finish();
 					return;
 				}
 			} catch {
-				// transient network error — keep polling
+				// keep polling
 			}
 
-			pollTimer = setTimeout(() => {
-				void poll();
-			}, SYNC_POLL_MS);
+			if (pollGenerationRef.current === generation) {
+				setTimeout(() => {
+					void poll();
+				}, SYNC_POLL_MS);
+			}
 		};
 
 		void poll();
-
-		return () => {
-			cancelled = true;
-			if (pollTimer) clearTimeout(pollTimer);
-		};
-	}, [fetcher.state, fetcher.data]);
+	}, [fetcher.state, fetcher.data, stopPolling]);
 
 	const handleClose = useCallback(() => {
 		if (isWaitingForWebhook) return;

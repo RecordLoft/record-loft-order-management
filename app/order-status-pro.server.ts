@@ -140,18 +140,40 @@ export function parseOrderIdsParam(value: string | null): bigint[] {
     .filter((id): id is bigint => id !== null);
 }
 
+export async function ordersSyncedSince(
+  orderIds: bigint[],
+  since: Date,
+): Promise<boolean> {
+  if (orderIds.length === 0 || Number.isNaN(since.getTime())) return false;
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderIds } },
+    select: { ospStatusSyncedAt: true },
+  });
+  if (rows.length !== orderIds.length) return false;
+  // Small slack for clock skew between app and database.
+  const sinceMs = since.getTime() - 1_000;
+  return rows.every(
+    (row) =>
+      row.ospStatusSyncedAt != null &&
+      row.ospStatusSyncedAt.getTime() >= sinceMs,
+  );
+}
+
 export async function ordersMatchCachedStatus(
   orderIds: bigint[],
   expectedStatusName: string,
 ): Promise<boolean> {
   if (orderIds.length === 0) return false;
+  const expected = expectedStatusName.trim().toLowerCase();
   const rows = await prisma.order.findMany({
     where: { id: { in: orderIds } },
     select: { ospStatusName: true },
   });
   return (
     rows.length === orderIds.length &&
-    rows.every((row) => row.ospStatusName === expectedStatusName)
+    rows.every(
+      (row) => row.ospStatusName?.trim().toLowerCase() === expected,
+    )
   );
 }
 

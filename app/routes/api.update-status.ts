@@ -47,8 +47,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   try {
+    const syncedAfter = new Date();
     await bulkUpdateOrderStatus(orderIds, statusCode);
-    return Response.json({ success: true });
+    return Response.json({
+      success: true,
+      syncedAfter: syncedAfter.toISOString(),
+    });
   } catch (error: unknown) {
     if (error instanceof RateLimitError) {
       return Response.json(
