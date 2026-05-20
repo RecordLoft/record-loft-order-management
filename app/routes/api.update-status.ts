@@ -1,4 +1,5 @@
 import {
+  BULK_STATUS_ORDER_THRESHOLD,
   bulkUpdateOrderStatus,
   RateLimitError,
 } from "../order-status-pro.server";
@@ -55,12 +56,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   } catch (error: unknown) {
     if (error instanceof RateLimitError) {
+      const rateLimitMessage =
+        orderIds.length >= BULK_STATUS_ORDER_THRESHOLD
+          ? "Order Status Pro bulk updates are limited to 5 per minute. Wait about a minute and try again."
+          : "Order Status Pro rate limit reached. Wait a moment and try again.";
       return Response.json(
-        {
-          success: false,
-          error:
-            "Order Status Pro rate limit reached. Wait about 10 seconds and try again.",
-        },
+        { success: false, error: rateLimitMessage },
         { status: 429 },
       );
     }
