@@ -3,53 +3,30 @@ name: Deploy to Netlify
 on:
   push:
     branches:
-      - main
-  workflow_dispatch:
-
-concurrency:
-  group: netlify-${{ github.ref }}
-  cancel-in-progress: true
+      - main # Change to 'master' if your default branch is named master
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    env:
-      NODE_ENV: production
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: yarn
+          node-version: 24
+          cache: "yarn"
 
       - name: Install dependencies
-        run: yarn install
+        run: yarn install --frozen-lockfile
 
-      - name: Generate Prisma client
+      - name: Generate Prisma Client
         run: yarn prisma generate
-        env:
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}
-
-      - name: Run database migrations
-        run: yarn prisma migrate deploy
-        env:
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}
-
-      - name: Build
-        run: yarn build
-        env:
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}
-          SHOPIFY_APP_URL: ${{ secrets.SHOPIFY_APP_URL }}
 
       - name: Deploy to Netlify
-        run: npx netlify-cli@latest deploy --prod --message "Deploy ${{ github.sha }}"
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          sudo yarn global add netlify-cli
+          export PATH="$(yarn global bin):$PATH"
+          netlify deploy --prod --build --auth=${{ secrets.NETLIFY_AUTH_TOKEN }} --site=${{ secrets.NETLIFY_SITE_ID }}
