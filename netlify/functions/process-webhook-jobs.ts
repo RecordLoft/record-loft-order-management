@@ -1,5 +1,5 @@
 import type { Config } from "@netlify/functions";
-import { fetchAppPath } from "./site-url";
+import { fetchAppPath } from "../lib/site-url";
 
 /**
  * Retries rows in WebhookFailure (~4×/day). Invokes the RR app over HTTP so

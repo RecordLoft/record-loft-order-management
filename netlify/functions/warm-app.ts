@@ -1,5 +1,5 @@
 import type { Config } from "@netlify/functions";
-import { fetchAppPath } from "./site-url";
+import { fetchAppPath } from "../lib/site-url";
 
 /**
  * Keeps the React Router System function warm for Shopify webhooks.
