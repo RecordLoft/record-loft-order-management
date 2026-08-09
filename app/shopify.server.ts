@@ -2,7 +2,6 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
-  DeliveryMethod,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { prisma } from "./db.server";
@@ -20,25 +19,8 @@ const shopify = shopifyApp({
   future: {
     expiringOfflineAccessTokens: true,
   },
-  webhooks: {
-    ORDERS_CREATE: {
-      deliveryMethod: DeliveryMethod.Http,
-      callbackUrl: "/api/webhooks/orders",
-    },
-    PRODUCTS_UPDATE: {
-      deliveryMethod: DeliveryMethod.Http,
-      callbackUrl: "/api/webhooks/products",
-    },
-    PRODUCTS_CREATE: {
-      deliveryMethod: DeliveryMethod.Http,
-      callbackUrl: "/api/webhooks/products",
-    },
-  },
-  hooks: {
-    afterAuth: async ({ session }) => {
-      await shopify.registerWebhooks({ session });
-    },
-  },
+  // Webhook subscriptions are declared in shopify.app.toml. Registering them
+  // here as well makes Shopify deliver every event twice.
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),
