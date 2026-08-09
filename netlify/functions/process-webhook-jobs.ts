@@ -26,8 +26,69 @@ export default async () => {
     return new Response(body, { status: response.status });
   }
 
-  // App route logs idle/work detail; keep Netlify side to status only.
-  console.log(`[cron/process-webhook-jobs] ok status=${response.status}`);
+  try {
+    const result = JSON.parse(body) as {
+      staleRecovered?: number;
+      failedRequeued?: number;
+      processed?: number;
+      completed?: number;
+      skipped?: number;
+      failed?: number;
+      jobs?: Array<{
+        id: string;
+        shop: string;
+        handler: string;
+        resourceId: string;
+        attempt: number;
+        maxAttempts: number;
+        outcome: "completed" | "skipped" | "failure";
+        detail?: string;
+        code?: string;
+        message?: string;
+      }>;
+    };
+
+    const processed = result.processed ?? 0;
+    const idle =
+      (result.staleRecovered ?? 0) === 0 &&
+      (result.failedRequeued ?? 0) === 0 &&
+      processed === 0;
+
+    if (idle) {
+      console.log(
+        `[cron/process-webhook-jobs] ok status=${response.status} idle (no pending failures)`,
+      );
+    } else {
+      console.log(
+        `[cron/process-webhook-jobs] ok status=${response.status} ` +
+          `staleRecovered=${result.staleRecovered ?? 0} ` +
+          `failedRequeued=${result.failedRequeued ?? 0} ` +
+          `processed=${processed} completed=${result.completed ?? 0} ` +
+          `skipped=${result.skipped ?? 0} failed=${result.failed ?? 0}`,
+      );
+      for (const job of result.jobs ?? []) {
+        const base =
+          `id=${job.id} shop=${job.shop} handler=${job.handler} ` +
+          `resourceId=${job.resourceId} attempt=${job.attempt}/${job.maxAttempts}`;
+        if (job.outcome === "failure") {
+          console.error(
+            `[cron/process-webhook-jobs] job ${base} outcome=failure ` +
+              `code=${job.code ?? "unknown"} message=${job.message ?? ""}`,
+          );
+        } else {
+          console.log(
+            `[cron/process-webhook-jobs] job ${base} outcome=${job.outcome} ` +
+              `detail=${job.detail ?? ""}`,
+          );
+        }
+      }
+    }
+  } catch {
+    console.log(
+      `[cron/process-webhook-jobs] ok status=${response.status} body=${body.slice(0, 500)}`,
+    );
+  }
+
   return new Response(body, { status: 200 });
 };
 

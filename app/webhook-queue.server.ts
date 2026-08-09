@@ -306,10 +306,22 @@ export async function processWebhookWork(
   }
 }
 
+export type WebhookFailureJobOutcome = {
+  id: string;
+  shop: string;
+  handler: WebhookFailureHandler;
+  resourceId: string;
+  attempt: number;
+  maxAttempts: number;
+} & (
+  | { outcome: "completed" | "skipped"; detail: string }
+  | { outcome: "failure"; code: string; message: string }
+);
+
 export async function processWebhookFailure(
   failureId: string,
   graphql?: GraphqlRequest,
-): Promise<boolean> {
+): Promise<WebhookFailureJobOutcome | null> {
   const claimed = await prisma.webhookFailure.updateMany({
     where: {
       id: failureId,
@@ -322,7 +334,7 @@ export async function processWebhookFailure(
     },
   });
 
-  if (claimed.count === 0) return false;
+  if (claimed.count === 0) return null;
 
   const row = await prisma.webhookFailure.findUniqueOrThrow({
     where: { id: failureId },
@@ -337,12 +349,21 @@ export async function processWebhookFailure(
     payload: row.payload,
   };
 
-  const runGraphql = graphql ?? (await graphqlForShop(row.shop));
+  const base = {
+    id: failureId,
+    shop: row.shop,
+    handler: row.handler,
+    resourceId: String(row.resourceId),
+    attempt: row.attempts,
+    maxAttempts: row.maxAttempts,
+  };
 
   const logPrefix =
     `[webhook-queue] retry id=${failureId} shop=${row.shop} ` +
     `handler=${row.handler} resourceId=${row.resourceId} ` +
     `attempt=${row.attempts}/${row.maxAttempts}`;
+
+  const runGraphql = graphql ?? (await graphqlForShop(row.shop));
 
   if (!runGraphql) {
     await recordFailureFromWork(
@@ -354,7 +375,12 @@ export async function processWebhookFailure(
       row.maxAttempts,
     );
     console.error(`${logPrefix} outcome=failure code=no_admin_session`);
-    return true;
+    return {
+      ...base,
+      outcome: "failure",
+      code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
+      message: "No offline session for shop",
+    };
   }
 
   try {
@@ -362,7 +388,11 @@ export async function processWebhookFailure(
     if (result.type === "success") {
       await prisma.webhookFailure.delete({ where: { id: failureId } });
       console.log(`${logPrefix} outcome=${result.outcome} detail=${result.detail}`);
-      return true;
+      return {
+        ...base,
+        outcome: result.outcome,
+        detail: result.detail,
+      };
     }
 
     await recordFailureFromWork(
@@ -376,6 +406,12 @@ export async function processWebhookFailure(
     console.error(
       `${logPrefix} outcome=failure code=${result.code} message=${result.message}`,
     );
+    return {
+      ...base,
+      outcome: "failure",
+      code: result.code,
+      message: result.message,
+    };
   } catch (error) {
     const message = await formatError(error);
     await recordFailureFromWork(
@@ -389,14 +425,22 @@ export async function processWebhookFailure(
     console.error(
       `${logPrefix} outcome=failure code=${WEBHOOK_ERROR_CODES.UNEXPECTED} message=${message}`,
     );
+    return {
+      ...base,
+      outcome: "failure",
+      code: WEBHOOK_ERROR_CODES.UNEXPECTED,
+      message,
+    };
   }
-
-  return true;
 }
 
 export async function processPendingWebhookFailures(
   options: ProcessWebhookFailuresOptions = {},
-): Promise<{ processed: number; failureIds: string[] }> {
+): Promise<{
+  processed: number;
+  failureIds: string[];
+  jobs: WebhookFailureJobOutcome[];
+}> {
   await recoverStaleWebhookFailures();
 
   const limit = options.limit ?? 25;
@@ -411,13 +455,17 @@ export async function processPendingWebhookFailures(
     select: { id: true },
   });
 
-  const failureIds: string[] = [];
+  const jobs: WebhookFailureJobOutcome[] = [];
   for (const { id } of pending) {
-    const ran = await processWebhookFailure(id, options.graphql);
-    if (ran) failureIds.push(id);
+    const job = await processWebhookFailure(id, options.graphql);
+    if (job) jobs.push(job);
   }
 
-  return { processed: failureIds.length, failureIds };
+  return {
+    processed: jobs.length,
+    failureIds: jobs.map((job) => job.id),
+    jobs,
+  };
 }
 
 /** Cron: reset terminal failed rows to pending (including no-session retries). */
@@ -454,8 +502,34 @@ export type WebhookQueueCronResult = {
   staleRecovered: number;
   failedRequeued: number;
   processed: number;
+  completed: number;
+  skipped: number;
+  failed: number;
   failureIds: string[];
+  jobs: WebhookFailureJobOutcome[];
 };
+
+function summarizeJobOutcomes(jobs: WebhookFailureJobOutcome[]) {
+  let completed = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const job of jobs) {
+    if (job.outcome === "completed") completed += 1;
+    else if (job.outcome === "skipped") skipped += 1;
+    else failed += 1;
+  }
+  return { completed, skipped, failed };
+}
+
+function formatJobOutcomeLine(job: WebhookFailureJobOutcome): string {
+  const base =
+    `id=${job.id} shop=${job.shop} handler=${job.handler} ` +
+    `resourceId=${job.resourceId} attempt=${job.attempt}/${job.maxAttempts}`;
+  if (job.outcome === "failure") {
+    return `${base} outcome=failure code=${job.code} message=${job.message}`;
+  }
+  return `${base} outcome=${job.outcome} detail=${job.detail}`;
+}
 
 /**
  * Scheduled recovery only — retries rows in WebhookFailure (not used on happy path).
@@ -468,11 +542,21 @@ export async function runWebhookQueueCron(
   const failedRequeued = await requeueFailedWebhookFailuresForCron({
     limit: batchSize,
   });
-  const { processed, failureIds } = await processPendingWebhookFailures({
+  const { processed, failureIds, jobs } = await processPendingWebhookFailures({
     limit: batchSize,
   });
+  const { completed, skipped, failed } = summarizeJobOutcomes(jobs);
 
-  const result = { staleRecovered, failedRequeued, processed, failureIds };
+  const result: WebhookQueueCronResult = {
+    staleRecovered,
+    failedRequeued,
+    processed,
+    completed,
+    skipped,
+    failed,
+    failureIds,
+    jobs,
+  };
   const idle =
     staleRecovered === 0 && failedRequeued === 0 && processed === 0;
 
@@ -481,9 +565,15 @@ export async function runWebhookQueueCron(
   } else {
     console.log(
       `[cron/webhook-jobs] staleRecovered=${staleRecovered} ` +
-        `failedRequeued=${failedRequeued} processed=${processed}` +
+        `failedRequeued=${failedRequeued} processed=${processed} ` +
+        `completed=${completed} skipped=${skipped} failed=${failed}` +
         (failureIds.length > 0 ? ` ids=${failureIds.join(",")}` : ""),
     );
+    for (const job of jobs) {
+      const line = `[cron/webhook-jobs] job ${formatJobOutcomeLine(job)}`;
+      if (job.outcome === "failure") console.error(line);
+      else console.log(line);
+    }
   }
 
   return result;
