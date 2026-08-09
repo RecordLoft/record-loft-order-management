@@ -1,7 +1,6 @@
 import {
   WebhookFailureHandler,
   WebhookFailureStatus,
-  type WebhookFailure,
 } from "../generated/prisma/client";
 import { prisma } from "./db.server";
 import type { GraphqlRequest } from "./product-description.server";
@@ -83,10 +82,7 @@ async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
 }
 
 async function runHandler(
-  work: Pick<
-    WebhookFailure,
-    "shop" | "handler" | "payload"
-  >,
+  work: { shop: string; handler: WebhookFailureHandler; payload: unknown },
   graphql: GraphqlRequest,
 ): Promise<
   | { type: "success"; outcome: "completed" | "skipped"; detail: string }
@@ -245,6 +241,10 @@ async function recordFailureFromWork(
   });
 }
 
+export type ProcessWebhookWorkResult =
+  | { status: "success"; outcome: "completed" | "skipped"; detail: string }
+  | { status: "failure"; code: string; message: string };
+
 /**
  * Run handler during the webhook request. Success clears any stored failure;
  * errors are upserted for scheduled cron retry (not processed locally).
@@ -252,19 +252,27 @@ async function recordFailureFromWork(
 export async function processWebhookWork(
   input: WebhookWorkInput,
   graphql?: GraphqlRequest,
-): Promise<"success" | "failure"> {
+): Promise<ProcessWebhookWorkResult> {
   const runGraphql = graphql ?? (await graphqlForShop(input.shop));
 
   if (!runGraphql) {
     await recordWebhookFailureNoSession(input);
-    return "failure";
+    return {
+      status: "failure",
+      code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
+      message: "No offline session for shop",
+    };
   }
 
   try {
     const result = await runHandler(input, runGraphql);
     if (result.type === "success") {
       await clearWebhookFailure(input);
-      return "success";
+      return {
+        status: "success",
+        outcome: result.outcome,
+        detail: result.detail,
+      };
     }
 
     await recordFailureFromWork(
@@ -275,17 +283,26 @@ export async function processWebhookWork(
       1,
       5,
     );
-    return "failure";
+    return {
+      status: "failure",
+      code: result.code,
+      message: result.message,
+    };
   } catch (error) {
+    const message = await formatError(error);
     await recordFailureFromWork(
       input,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
-      await formatError(error),
+      message,
       null,
       1,
       5,
     );
-    return "failure";
+    return {
+      status: "failure",
+      code: WEBHOOK_ERROR_CODES.UNEXPECTED,
+      message,
+    };
   }
 }
 
@@ -322,6 +339,11 @@ export async function processWebhookFailure(
 
   const runGraphql = graphql ?? (await graphqlForShop(row.shop));
 
+  const logPrefix =
+    `[webhook-queue] retry id=${failureId} shop=${row.shop} ` +
+    `handler=${row.handler} resourceId=${row.resourceId} ` +
+    `attempt=${row.attempts}/${row.maxAttempts}`;
+
   if (!runGraphql) {
     await recordFailureFromWork(
       work,
@@ -331,6 +353,7 @@ export async function processWebhookFailure(
       row.attempts,
       row.maxAttempts,
     );
+    console.error(`${logPrefix} outcome=failure code=no_admin_session`);
     return true;
   }
 
@@ -338,6 +361,7 @@ export async function processWebhookFailure(
     const result = await runHandler(row, runGraphql);
     if (result.type === "success") {
       await prisma.webhookFailure.delete({ where: { id: failureId } });
+      console.log(`${logPrefix} outcome=${result.outcome} detail=${result.detail}`);
       return true;
     }
 
@@ -349,14 +373,21 @@ export async function processWebhookFailure(
       row.attempts,
       row.maxAttempts,
     );
+    console.error(
+      `${logPrefix} outcome=failure code=${result.code} message=${result.message}`,
+    );
   } catch (error) {
+    const message = await formatError(error);
     await recordFailureFromWork(
       work,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
-      await formatError(error),
+      message,
       null,
       row.attempts,
       row.maxAttempts,
+    );
+    console.error(
+      `${logPrefix} outcome=failure code=${WEBHOOK_ERROR_CODES.UNEXPECTED} message=${message}`,
     );
   }
 
@@ -441,7 +472,21 @@ export async function runWebhookQueueCron(
     limit: batchSize,
   });
 
-  return { staleRecovered, failedRequeued, processed, failureIds };
+  const result = { staleRecovered, failedRequeued, processed, failureIds };
+  const idle =
+    staleRecovered === 0 && failedRequeued === 0 && processed === 0;
+
+  if (idle) {
+    console.log("[cron/webhook-jobs] idle (no pending failures)");
+  } else {
+    console.log(
+      `[cron/webhook-jobs] staleRecovered=${staleRecovered} ` +
+        `failedRequeued=${failedRequeued} processed=${processed}` +
+        (failureIds.length > 0 ? ` ids=${failureIds.join(",")}` : ""),
+    );
+  }
+
+  return result;
 }
 
 export async function listWebhookFailures(

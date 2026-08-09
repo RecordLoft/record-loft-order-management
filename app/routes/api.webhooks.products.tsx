@@ -12,19 +12,15 @@ export const action = async ({ request }: Route.ActionArgs) => {
   const cold = consumeColdStartFlag();
 
   const authStart = performance.now();
-  const { topic, shop, session, admin, payload } =
-    await authenticate.webhook(request);
+  const { topic, shop, admin, payload } = await authenticate.webhook(request);
   const authMs = msSince(authStart);
 
   const webhookId = request.headers.get("x-shopify-webhook-id");
-
-  console.log(
-    `[products-webhook] ${topic} shop=${shop} session=${session ? "yes" : "no"} admin=${admin ? "yes" : "no"}`,
-  );
+  const timing = `cold=${cold} authMs=${authMs}`;
 
   if (topic !== "PRODUCTS_CREATE" && topic !== "PRODUCTS_UPDATE") {
     console.log(
-      `[products-webhook] timing cold=${cold} authMs=${authMs} workMs=0 totalMs=${msSince(totalStart)} topic=${topic}`,
+      `[products-webhook] ignored topic=${topic} shop=${shop} ${timing} totalMs=${msSince(totalStart)}`,
     );
     return new Response("Webhook handled", { status: 200 });
   }
@@ -41,29 +37,35 @@ export const action = async ({ request }: Route.ActionArgs) => {
   };
 
   if (!admin) {
-    console.error(
-      `[products-webhook] No admin API context for ${shop}. ` +
-        "Open the app once on this store so an offline session exists.",
-    );
     const workStart = performance.now();
     await recordWebhookFailureNoSession(enqueueInput);
-    console.log(
-      `[products-webhook] timing cold=${cold} authMs=${authMs} workMs=${msSince(workStart)} totalMs=${msSince(totalStart)} productId=${productId} outcome=no_session`,
+    console.error(
+      `[products-webhook] ${topic} productId=${productId} shop=${shop} ` +
+        `outcome=failure code=no_admin_session persisted=cron_retry ` +
+        `${timing} workMs=${msSince(workStart)} totalMs=${msSince(totalStart)}`,
     );
     return new Response("No session for shop", { status: 200 });
   }
 
   const graphql = admin.graphql.bind(admin);
   const workStart = performance.now();
-  const outcome = await processWebhookWork(enqueueInput, graphql);
+  const result = await processWebhookWork(enqueueInput, graphql);
   const workMs = msSince(workStart);
+  const totalMs = msSince(totalStart);
 
-  console.log(
-    `[products-webhook] Product ${productId}: ${outcome} (failures persisted for cron)`,
-  );
-  console.log(
-    `[products-webhook] timing cold=${cold} authMs=${authMs} workMs=${workMs} totalMs=${msSince(totalStart)} productId=${productId} outcome=${outcome}`,
-  );
+  if (result.status === "success") {
+    console.log(
+      `[products-webhook] ${topic} productId=${productId} shop=${shop} ` +
+        `outcome=${result.outcome} detail=${result.detail} ` +
+        `${timing} workMs=${workMs} totalMs=${totalMs}`,
+    );
+  } else {
+    console.error(
+      `[products-webhook] ${topic} productId=${productId} shop=${shop} ` +
+        `outcome=failure code=${result.code} message=${result.message} ` +
+        `persisted=cron_retry ${timing} workMs=${workMs} totalMs=${totalMs}`,
+    );
+  }
 
   return new Response("Webhook handled", { status: 200 });
 };

@@ -6,9 +6,8 @@ import type { Route } from "./+types/api.cron.webhook-jobs";
 async function handleCron(request: Request) {
   authorizeCronRequest(request);
 
+  // Logging happens inside runWebhookQueueCron (idle vs work summary).
   const result = await runWebhookQueueCron();
-  console.log("[cron/webhook-jobs]", JSON.stringify(result));
-
   return Response.json(result);
 }
 

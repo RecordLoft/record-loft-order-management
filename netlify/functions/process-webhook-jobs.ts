@@ -10,7 +10,7 @@ import { fetchAppPath } from "./site-url";
  */
 export default async () => {
   if (process.env.WEBHOOK_CRON_ENABLED === "false") {
-    console.log("[cron] WEBHOOK_CRON_ENABLED=false, skipping");
+    console.log("[cron/process-webhook-jobs] disabled (WEBHOOK_CRON_ENABLED=false)");
     return new Response("skipped", { status: 200 });
   }
 
@@ -21,12 +21,13 @@ export default async () => {
 
   if (!response.ok) {
     console.error(
-      `[cron] /api/cron/webhook-jobs failed status=${response.status} body=${body.slice(0, 500)}`,
+      `[cron/process-webhook-jobs] request failed status=${response.status} body=${body.slice(0, 500)}`,
     );
     return new Response(body, { status: response.status });
   }
 
-  console.log("[cron]", body);
+  // App route logs idle/work detail; keep Netlify side to status only.
+  console.log(`[cron/process-webhook-jobs] ok status=${response.status}`);
   return new Response(body, { status: 200 });
 };
 
