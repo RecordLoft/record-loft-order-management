@@ -3,7 +3,7 @@ import { fetchAppPath } from "../lib/site-url";
 
 /**
  * Keeps the React Router System function warm for Shopify webhooks.
- * Complements hourly supabase-ping (DB keep-alive), which does not warm System.
+ * Complements hourly db-ping (DB canary), which does not warm System.
  */
 export default async () => {
   const started = Date.now();

@@ -1,17 +1,16 @@
 import { Config } from "@netlify/functions";
 import { prisma } from "../../app/db.server";
 
-export default async (req: Request) => {
+export default async (_req: Request) => {
   try {
-    // Run an ultra-light database ping against your session store
     const sessionCount = await prisma.session.count();
 
     console.log(
-      `☕ Supabase Pinged successfully. Current App Sessions: ${sessionCount}`,
+      `DB ping ok. Current App Sessions: ${sessionCount}`,
     );
-    return new Response("Supabase is awake!", { status: 200 });
+    return new Response("Database is awake!", { status: 200 });
   } catch (error) {
-    console.error("❌ Failed to keep Supabase awake:", error);
+    console.error("Failed to ping database:", error);
     return new Response("Database ping failed", { status: 500 });
   }
 };

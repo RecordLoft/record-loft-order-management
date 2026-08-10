@@ -83,7 +83,7 @@ enum WebhookFailureHandler {
   orders_create
 }
 
-/// Failed webhook work only — successes are not persisted (Supabase storage).
+/// Failed webhook work only — successes are not persisted.
 model WebhookFailure {
   id              String                @id @default(cuid())
   shop            String
