@@ -287,38 +287,12 @@ export function buildProductDescriptionHtml(
   return next === currentDescriptionHtml.trim() ? null : next;
 }
 
-const EBAY_TITLE_METAFIELD = {
-  namespace: "custom",
-  key: "ebay_title",
-} as const;
-
-/** SEO page title: custom.ebay_title when set, otherwise the product title. */
-export function resolveSeoPageTitle(
-  productTitle: string,
-  metafields: ProductMetafield[],
-): string {
-  const index = indexAllMetafields(metafields);
-  const ebayTitle = index
-    .get(
-      metafieldLookupKey(
-        EBAY_TITLE_METAFIELD.namespace,
-        EBAY_TITLE_METAFIELD.key,
-      ),
-    )
-    ?.trim();
-  if (isSetMetafieldValue(ebayTitle)) return ebayTitle;
-  return productTitle.trim();
-}
-
 export const PRODUCT_METAFIELDS_QUERY = `#graphql
   query ProductMetafieldsPage($id: ID!, $cursor: String) {
     product(id: $id) {
       id
       title
       descriptionHtml
-      seo {
-        title
-      }
       metafields(first: 100, after: $cursor) {
         pageInfo {
           hasNextPage
@@ -371,7 +345,6 @@ type MetafieldsPage = {
     id: string;
     title: string;
     descriptionHtml: string;
-    seo: { title: string | null } | null;
     metafields: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
       nodes: MetafieldGraphNode[];
@@ -382,7 +355,6 @@ type MetafieldsPage = {
 export type FetchedProduct = {
   title: string;
   descriptionHtml: string;
-  seoTitle: string | null;
   metafields: ProductMetafield[];
 };
 
@@ -397,7 +369,6 @@ export async function fetchProductWithAllMetafields(
   let cursor: string | null = null;
   let title = "";
   let descriptionHtml = "";
-  let seoTitle: string | null = null;
 
   do {
     const response = await graphql(PRODUCT_METAFIELDS_QUERY, {
@@ -415,7 +386,6 @@ export async function fetchProductWithAllMetafields(
     const product = json.data.product;
     title = product.title ?? "";
     descriptionHtml = product.descriptionHtml ?? "";
-    seoTitle = product.seo?.title ?? null;
     allMetafields.push(...product.metafields.nodes.map(metafieldFromGraphNode));
 
     cursor = product.metafields.pageInfo.hasNextPage
@@ -428,7 +398,7 @@ export async function fetchProductWithAllMetafields(
     allMetafields,
   );
 
-  return { title, descriptionHtml, seoTitle, metafields };
+  return { title, descriptionHtml, metafields };
 }
 
 export const PRODUCT_UPDATE_MUTATION = `#graphql
@@ -455,7 +425,7 @@ export type DescriptionSyncResult =
   | { outcome: "skipped" }
   | { outcome: "error"; message: string; code?: string };
 
-/** Fetch all metafields, rebuild descriptionHtml + SEO title, update when changed. */
+/** Fetch all metafields, rebuild descriptionHtml, update when changed. */
 export async function syncProductDescription(
   graphql: GraphqlRequest,
   productGid: string,
@@ -476,29 +446,16 @@ export async function syncProductDescription(
     selectedFields,
   );
 
-  const nextSeoTitle = resolveSeoPageTitle(
-    productData.title,
-    productData.metafields,
-  );
-
-  const seoTitleNeedsUpdate =
-    nextSeoTitle !== (productData.seoTitle ?? "").trim();
-
-  const hasChanges = nextDescription !== null || seoTitleNeedsUpdate;
-  if (!hasChanges) {
+  if (nextDescription === null) {
     return { outcome: "skipped" };
   }
 
   if (options?.dryRun) return { outcome: "updated" };
 
-  const input: Record<string, unknown> = { id: productGid };
-  if (nextDescription !== null) {
-    input.descriptionHtml = nextDescription;
-  }
-  if (seoTitleNeedsUpdate) {
-    // Only set title; leave description unset so Shopify defaults to product description.
-    input.seo = { title: nextSeoTitle };
-  }
+  const input: Record<string, unknown> = {
+    id: productGid,
+    descriptionHtml: nextDescription,
+  };
 
   const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
     variables: { input },
