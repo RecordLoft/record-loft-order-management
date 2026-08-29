@@ -11,10 +11,6 @@ import {
   Select,
   Text,
 } from "@shopify/polaris";
-import {
-  WebhookFailureHandler,
-  WebhookFailureStatus,
-} from "../../generated/prisma/client";
 import { useEffect, useMemo, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
@@ -22,6 +18,10 @@ import {
   useLoaderData,
   useSearchParams,
 } from "react-router";
+import type {
+  WebhookFailureHandler,
+  WebhookFailureStatus,
+} from "../../generated/prisma/client";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -30,10 +30,16 @@ import {
   retryWebhookFailuresForShop,
 } from "../webhook-queue.server";
 
-const HANDLER_LABELS: Record<WebhookFailureHandler, string> = {
-  [WebhookFailureHandler.orders_create]: "Orders create",
-  [WebhookFailureHandler.product_description_sync]: "Product description",
-};
+const JOB_STATUSES = [
+  "pending",
+  "processing",
+  "failed",
+] as const satisfies readonly WebhookFailureStatus[];
+
+const HANDLER_LABELS = {
+  orders_create: "Orders create",
+  product_description_sync: "Product description",
+} as const satisfies Record<WebhookFailureHandler, string>;
 
 type SerializedJob = {
   id: string;
@@ -53,23 +59,24 @@ function resourceAdminUrl(
   handler: WebhookFailureHandler,
   resourceId: string,
 ): string | null {
-  if (handler === WebhookFailureHandler.orders_create) {
+  if (handler === "orders_create") {
     return `https://${shop}/admin/orders/${resourceId}`;
   }
-  if (handler === WebhookFailureHandler.product_description_sync) {
+  if (handler === "product_description_sync") {
     return `https://${shop}/admin/products/${resourceId}`;
   }
   return null;
 }
 
 function parseStatus(raw: string | null): WebhookFailureStatus | undefined {
-  if (
-    raw &&
-    Object.values(WebhookFailureStatus).includes(raw as WebhookFailureStatus)
-  ) {
+  if (raw && JOB_STATUSES.includes(raw as WebhookFailureStatus)) {
     return raw as WebhookFailureStatus;
   }
   return undefined;
+}
+
+function isJobHandler(value: string): value is WebhookFailureHandler {
+  return value in HANDLER_LABELS;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -95,18 +102,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
   const total = counts.pending + counts.processing + counts.failed;
 
-  const serialized: SerializedJob[] = jobs.map((job) => ({
-    id: job.id,
-    handler: job.handler,
-    topic: job.topic,
-    resourceId: job.resourceId.toString(),
-    status: job.status,
-    attempts: job.attempts,
-    maxAttempts: job.maxAttempts,
-    errorCode: job.errorCode,
-    errorMessage: job.errorMessage,
-    updatedAt: job.updatedAt.toISOString(),
-  }));
+  const serialized: SerializedJob[] = jobs.flatMap((job) => {
+    if (!isJobHandler(job.handler)) return [];
+    return [
+      {
+        id: job.id,
+        handler: job.handler,
+        topic: job.topic,
+        resourceId: job.resourceId.toString(),
+        status: job.status,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        errorCode: job.errorCode,
+        errorMessage: job.errorMessage,
+        updatedAt: job.updatedAt.toISOString(),
+      },
+    ];
+  });
 
   return { shop: session.shop, jobs: serialized, counts, total, status: status ?? "all" };
 };
@@ -150,10 +162,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 function statusBadge(status: WebhookFailureStatus) {
-  if (status === WebhookFailureStatus.failed) {
+  if (status === "failed") {
     return <Badge tone="critical">Failed</Badge>;
   }
-  if (status === WebhookFailureStatus.processing) {
+  if (status === "processing") {
     return <Badge tone="info">Processing</Badge>;
   }
   return <Badge tone="attention">Pending</Badge>;
@@ -195,14 +207,14 @@ export default function WebhookFailuresPage() {
       primaryAction={
         retryableCount > 0
           ? {
-              content: "Retry all",
-              loading: retryingAll,
-              onAction: () => {
-                const form = new FormData();
-                form.set("intent", "retry_all");
-                fetcher.submit(form, { method: "post" });
-              },
-            }
+            content: "Retry all",
+            loading: retryingAll,
+            onAction: () => {
+              const form = new FormData();
+              form.set("intent", "retry_all");
+              fetcher.submit(form, { method: "post" });
+            },
+          }
           : undefined
       }
     >
@@ -271,8 +283,7 @@ export default function WebhookFailuresPage() {
                       job.handler,
                       job.resourceId,
                     );
-                    const canRetry =
-                      job.status !== WebhookFailureStatus.processing;
+                    const canRetry = job.status !== "processing";
                     const busy = retryingAll || retryingId === job.id;
 
                     return (
