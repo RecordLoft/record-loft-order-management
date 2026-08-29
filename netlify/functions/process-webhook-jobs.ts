@@ -2,7 +2,7 @@ import type { Config } from "@netlify/functions";
 import { fetchAppPath } from "../lib/site-url";
 
 /**
- * Retries rows in WebhookFailure (~4×/day). Invokes the RR app over HTTP so
+ * Drains pending WebhookFailure rows (~4×/day). Invokes the RR app over HTTP so
  * Shopify/Prisma run in the System function (avoids Netlify bundle init crash
  * from importing app code here).
  *

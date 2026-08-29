@@ -2,7 +2,7 @@ import { authorizeCronRequest } from "../cron.server";
 import { runWebhookQueueCron } from "../webhook-queue.server";
 import type { Route } from "./+types/api.cron.webhook-jobs";
 
-/** Manual backlog drain (1 invocation). Webhooks do not use this on the happy path. */
+/** Drain pending webhook jobs (process-webhook-jobs every 6h, or this path manually). */
 async function handleCron(request: Request) {
   authorizeCronRequest(request);
 

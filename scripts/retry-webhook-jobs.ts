@@ -3,7 +3,7 @@
  *
  *   SHOP=your-store.myshopify.com yarn retry:webhooks -- --list --status failed
  *
- * Cron (every 6h) retries failed rows; webhooks process inline on delivery.
+ * Dedicated cron (every 6h) processes pending rows; failed rows stay for the admin screen.
  */
 import "dotenv/config";
 import { listWebhookFailures } from "../app/webhook-queue.server";

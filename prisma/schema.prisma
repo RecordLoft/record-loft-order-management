@@ -83,7 +83,7 @@ enum WebhookFailureHandler {
   orders_create
 }
 
-/// Failed webhook work only — successes are not persisted.
+/// Queued and failed webhook work — successes are deleted after processing.
 model WebhookFailure {
   id              String                @id @default(cuid())
   shop            String

@@ -4,6 +4,7 @@ import { fetchAppPath } from "../lib/site-url";
 /**
  * Keeps the React Router System function warm for Shopify webhooks.
  * Complements hourly db-ping (DB canary), which does not warm System.
+ * Webhook work is waitUntil on delivery, with process-webhook-jobs as backup.
  */
 export default async () => {
   const started = Date.now();

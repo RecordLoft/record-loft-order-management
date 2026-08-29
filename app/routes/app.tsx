@@ -23,6 +23,7 @@ export default function App() {
       <PolarisProvider i18n={enTranslations}>
         <ui-nav-menu>
           <a href="/app/record-planet">Record Planet</a>
+          <a href="/app/webhooks">Webhook status</a>
         </ui-nav-menu>
         <Outlet />
       </PolarisProvider>

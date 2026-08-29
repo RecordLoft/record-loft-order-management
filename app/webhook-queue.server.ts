@@ -206,6 +206,53 @@ export async function recordWebhookFailureNoSession(input: WebhookWorkInput) {
   );
 }
 
+/**
+ * Ack-first: store the payload as pending and return. Cron / admin retries
+ * run the handler; successes are deleted, failures stay in this table.
+ */
+export async function enqueueWebhookWork(input: WebhookWorkInput) {
+  const resourceId = resourceIdBigInt(input);
+
+  return prisma.webhookFailure.upsert({
+    where: {
+      shop_handler_resourceId: {
+        shop: input.shop,
+        handler: input.handler,
+        resourceId,
+      },
+    },
+    create: {
+      shop: input.shop,
+      handler: input.handler,
+      topic: input.topic,
+      resourceId,
+      resourceGid: input.resourceGid ?? null,
+      webhookId: input.webhookId ?? null,
+      payload: input.payload as object,
+      status: WebhookFailureStatus.pending,
+      outcome: null,
+      errorCode: null,
+      errorMessage: null,
+      attempts: 0,
+      lastAttemptAt: null,
+      completedAt: null,
+    },
+    update: {
+      topic: input.topic,
+      resourceGid: input.resourceGid ?? undefined,
+      webhookId: input.webhookId ?? undefined,
+      payload: input.payload as object,
+      status: WebhookFailureStatus.pending,
+      outcome: null,
+      errorCode: null,
+      errorMessage: null,
+      attempts: 0,
+      lastAttemptAt: null,
+      completedAt: null,
+    },
+  });
+}
+
 export async function recoverStaleWebhookFailures(): Promise<number> {
   const staleBefore = new Date(Date.now() - STALE_PROCESSING_MS);
   const result = await prisma.webhookFailure.updateMany({
@@ -246,8 +293,8 @@ export type ProcessWebhookWorkResult =
   | { status: "failure"; code: string; message: string };
 
 /**
- * Run handler during the webhook request. Success clears any stored failure;
- * errors are upserted for scheduled cron retry (not processed locally).
+ * Run the handler immediately. Webhook HTTP routes enqueue + schedule instead
+ * so Shopify can be acked within 5s.
  */
 export async function processWebhookWork(
   input: WebhookWorkInput,
@@ -434,6 +481,101 @@ export async function processWebhookFailure(
   }
 }
 
+function getNetlifyWaitUntil():
+  | ((promise: Promise<unknown>) => void)
+  | undefined {
+  const context = (
+    globalThis as {
+      Netlify?: {
+        context?: { waitUntil?: (promise: Promise<unknown>) => void } | null;
+      };
+    }
+  ).Netlify?.context;
+  const waitUntil = context?.waitUntil;
+  return waitUntil ? waitUntil.bind(context) : undefined;
+}
+
+/**
+ * Run queued work after the webhook HTTP response is sent. Uses Netlify
+ * `waitUntil` in production so the instance stays alive; locally the promise
+ * is detached. Cron still drains anything left pending/failed.
+ */
+export function scheduleWebhookProcessing(
+  failureId: string,
+  graphql?: GraphqlRequest,
+): "waitUntil" | "detached" {
+  const run = processWebhookFailure(failureId, graphql).catch(
+    async (error: unknown) => {
+      console.error(
+        `[webhook-queue] after-ack id=${failureId}`,
+        await formatError(error),
+      );
+    },
+  );
+  const waitUntil = getNetlifyWaitUntil();
+  if (waitUntil) {
+    waitUntil(run);
+    return "waitUntil";
+  }
+  void run;
+  return "detached";
+}
+
+/**
+ * Manual retry from admin: force the row back to pending, then process now.
+ * Shop-scoped so one store cannot retry another store's jobs.
+ */
+export async function retryWebhookFailure(
+  failureId: string,
+  options: { shop: string; graphql?: GraphqlRequest },
+): Promise<WebhookFailureJobOutcome | null> {
+  const existing = await prisma.webhookFailure.findFirst({
+    where: { id: failureId, shop: options.shop },
+    select: { id: true },
+  });
+  if (!existing) return null;
+
+  await prisma.webhookFailure.update({
+    where: { id: failureId },
+    data: {
+      status: WebhookFailureStatus.pending,
+      completedAt: null,
+    },
+  });
+
+  return processWebhookFailure(failureId, options.graphql);
+}
+
+export async function retryWebhookFailuresForShop(
+  shop: string,
+  options: { limit?: number; ids?: string[] } = {},
+): Promise<{
+  processed: number;
+  jobs: WebhookFailureJobOutcome[];
+}> {
+  const limit = options.limit ?? CRON_BATCH_LIMIT;
+  const rows = await prisma.webhookFailure.findMany({
+    where: {
+      shop,
+      status: {
+        in: [WebhookFailureStatus.pending, WebhookFailureStatus.failed],
+      },
+      ...(options.ids ? { id: { in: options.ids } } : {}),
+    },
+    orderBy: { updatedAt: "asc" },
+    take: limit,
+    select: { id: true },
+  });
+
+  const jobs: WebhookFailureJobOutcome[] = [];
+  for (const { id } of rows) {
+    const job = await retryWebhookFailure(id, { shop });
+    if (job) jobs.push(job);
+  }
+
+  return { processed: jobs.length, jobs };
+}
+
 export async function processPendingWebhookFailures(
   options: ProcessWebhookFailuresOptions = {},
 ): Promise<{
@@ -532,16 +674,19 @@ function formatJobOutcomeLine(job: WebhookFailureJobOutcome): string {
 }
 
 /**
- * Scheduled recovery only — retries rows in WebhookFailure (not used on happy path).
+ * Drain pending webhook jobs. Terminal `failed` rows stay for admin retry
+ * unless `requeueFailed` is set.
  */
 export async function runWebhookQueueCron(
-  options: { batchSize?: number } = {},
+  options: { batchSize?: number; requeueFailed?: boolean } = {},
 ): Promise<WebhookQueueCronResult> {
   const batchSize = options.batchSize ?? CRON_BATCH_LIMIT;
   const staleRecovered = await recoverStaleWebhookFailures();
-  const failedRequeued = await requeueFailedWebhookFailuresForCron({
-    limit: batchSize,
-  });
+  const failedRequeued = options.requeueFailed
+    ? await requeueFailedWebhookFailuresForCron({
+        limit: batchSize,
+      })
+    : 0;
   const { processed, failureIds, jobs } = await processPendingWebhookFailures({
     limit: batchSize,
   });
