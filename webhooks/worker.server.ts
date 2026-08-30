@@ -22,15 +22,22 @@ import {
 } from "./queue.server";
 
 const PORT = Number(process.env.PORT || 8080);
-const ALLOWED_TOPICS = new Set(
-  (
-    process.env.ALLOWED_TOPICS ??
-    "products/create,products/update,orders/create"
-  )
-    .split(",")
-    .map((topic) => topic.trim().toLowerCase())
-    .filter(Boolean),
-);
+
+export function allowedTopicsFromEnv(
+  raw = process.env.ALLOWED_TOPICS,
+): Set<string> {
+  return new Set(
+    (raw ?? "products/create,products/update,orders/create")
+      .split(",")
+      .map((topic) => topic.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+export const workerState = {
+  shuttingDown: false,
+  inFlight: 0,
+};
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -63,7 +70,7 @@ async function persistAckDrop(
   }
 }
 
-async function handlePush(req: IncomingMessage, res: ServerResponse) {
+export async function handlePush(req: IncomingMessage, res: ServerResponse) {
   let envelope: PubSubPushEnvelope;
   try {
     envelope = (await readJson(req)) as PubSubPushEnvelope;
@@ -86,7 +93,7 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   const source = isAdminRetry(envelope.message?.attributes)
     ? "admin-retry"
     : "shopify-publish";
-  if (!ALLOWED_TOPICS.has(topic)) {
+  if (!allowedTopicsFromEnv().has(topic)) {
     const reason = `topic ${topic} not allowed`;
     console.log(
       `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId} source=${source}`,
@@ -151,10 +158,10 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
-let shuttingDown = false;
-let inFlight = 0;
-
-const server = createServer((req, res) => {
+export function handleWorkerRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+) {
   const url = new URL(
     req.url ?? "/",
     `http://${req.headers.host ?? "localhost"}`,
@@ -179,43 +186,53 @@ const server = createServer((req, res) => {
     req.method === "POST" &&
     (url.pathname === "/" || url.pathname === "/pubsub")
   ) {
-    if (shuttingDown) {
+    if (workerState.shuttingDown) {
       send(res, 503, { status: "shutting_down" });
       return;
     }
-    inFlight += 1;
+    workerState.inFlight += 1;
     handlePush(req, res)
       .catch((error: unknown) => {
         console.error("[pubsub-worker] unhandled", error);
         send(res, 500, { status: "error" });
       })
       .finally(() => {
-        inFlight -= 1;
+        workerState.inFlight -= 1;
       });
     return;
   }
 
   send(res, 404, { status: "not_found" });
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `[pubsub-worker] listening on ${PORT} topics=${[...ALLOWED_TOPICS].join(",")}`,
-  );
-});
+}
 
 function drainAndExit() {
-  if (inFlight > 0) {
+  if (workerState.inFlight > 0) {
     setTimeout(drainAndExit, 50);
     return;
   }
   closeDb().finally(() => process.exit(0));
 }
 
-process.on("SIGTERM", () => {
-  console.log("[pubsub-worker] SIGTERM, draining");
-  shuttingDown = true;
-  server.close(() => {
-    drainAndExit();
+export function startWorker() {
+  const server = createServer(handleWorkerRequest);
+
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(
+      `[pubsub-worker] listening on ${PORT} topics=${[...allowedTopicsFromEnv()].join(",")}`,
+    );
   });
-});
+
+  process.on("SIGTERM", () => {
+    console.log("[pubsub-worker] SIGTERM, draining");
+    workerState.shuttingDown = true;
+    server.close(() => {
+      drainAndExit();
+    });
+  });
+
+  return server;
+}
+
+if (!process.env.VITEST) {
+  startWorker();
+}

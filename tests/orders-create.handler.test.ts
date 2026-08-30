@@ -187,4 +187,132 @@ describe("handleOrdersCreate", () => {
     );
     expect(markFulfillmentOrdersInProgress).toHaveBeenCalled();
   });
+
+  it("imports custom items without product enrichment", async () => {
+    const customPayload = {
+      ...payload,
+      line_items: [
+        {
+          id: 12,
+          product_id: null,
+          title: "Custom fee",
+          quantity: 1,
+          price: "2.00",
+          variant_id: null,
+          sku: null,
+        },
+      ],
+      customer: null,
+    };
+
+    await expect(handleOrdersCreate(shop, customPayload, vi.fn())).resolves.toEqual({
+      outcome: "completed",
+      detail: "imported",
+    });
+    expect(tx.customer.upsert).not.toHaveBeenCalled();
+    expect(tx.order.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          customerId: undefined,
+          deliveryMethod: null,
+        }),
+      }),
+    );
+    expect(listFulfillmentOrdersForOrder).not.toHaveBeenCalled();
+  });
+
+  it("uses billing/shipping phone when the customer has none", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: { nodes: [{ id: "gid://shopify/Product/55" }] },
+      }),
+    );
+    const withoutCustomerPhone = {
+      ...payload,
+      customer: { ...payload.customer!, phone: null },
+      billing_address: { phone: "555-0199" },
+    };
+
+    await handleOrdersCreate(shop, withoutCustomerPhone, graphql);
+    expect(tx.customer.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ phone: "555-0199" }),
+      }),
+    );
+  });
+
+  it("retries when fulfillment orders cannot be listed", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: { nodes: [{ id: "gid://shopify/Product/55" }] },
+      }),
+    );
+    listFulfillmentOrdersForOrder.mockResolvedValue({
+      ok: false,
+      retryable: true,
+      code: "graphql_errors",
+      message: "blip",
+    });
+
+    await expect(handleOrdersCreate(shop, payload, graphql)).resolves.toEqual({
+      outcome: "error",
+      code: "graphql_errors",
+      message: "blip",
+      retry: true,
+    });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns a fulfillment progress error after import", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          nodes: [
+            {
+              id: "gid://shopify/Product/55",
+              productType: "Record Planet Shipping",
+            },
+          ],
+        },
+      }),
+    );
+    markFulfillmentOrdersInProgress.mockResolvedValue({
+      ok: false,
+      retryable: true,
+      code: "fulfillment_orders_not_ready",
+      message: "No fulfillment orders on order yet",
+    });
+
+    await expect(handleOrdersCreate(shop, payload, graphql)).resolves.toEqual({
+      outcome: "error",
+      code: "fulfillment_orders_not_ready",
+      message: "No fulfillment orders on order yet",
+      retry: true,
+    });
+    expect(tx.order.upsert).toHaveBeenCalled();
+  });
+
+  it("reports fulfillment already in progress", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          nodes: [
+            {
+              id: "gid://shopify/Product/55",
+              productType: "Record Planet Shipping",
+            },
+          ],
+        },
+      }),
+    );
+    markFulfillmentOrdersInProgress.mockResolvedValue({
+      ok: true,
+      marked: 0,
+    });
+
+    await expect(handleOrdersCreate(shop, payload, graphql)).resolves.toEqual({
+      outcome: "completed",
+      detail: "imported, fulfillment already in progress",
+    });
+  });
 });

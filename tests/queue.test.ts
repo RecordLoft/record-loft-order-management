@@ -12,7 +12,10 @@ const {
   const prismaMock = {
     webhookFailure: {
       updateMany: vi.fn(),
+      update: vi.fn(),
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -45,9 +48,13 @@ import {
   PROCESSING_LEASE_MS,
   WEBHOOK_ERROR_CODES,
   claimWebhookWork,
+  enqueueWebhookWork,
   isProcessingLeaseExpired,
+  listWebhookFailures,
   processWebhookWork,
   processingLeaseCutoff,
+  recordAckDrop,
+  tryEnqueueWebhookWork,
   type WebhookWorkInput,
 } from "../webhooks/queue.server";
 
@@ -226,6 +233,182 @@ describe("processWebhookWork", () => {
       code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
       message: "No offline session for shop",
       retry: false,
+    });
+  });
+
+  it("deletes the row when the handler skips", async () => {
+    handleProductDescriptionSync.mockResolvedValue({
+      outcome: "skipped",
+      detail: "skipped",
+    });
+    const productWork: WebhookWorkInput = {
+      ...work,
+      handler: WebhookFailureHandler.product_description_sync,
+      topic: "PRODUCTS_UPDATE",
+    };
+
+    await expect(processWebhookWork(productWork, graphql)).resolves.toEqual({
+      status: "success",
+      outcome: "skipped",
+      detail: "skipped",
+    });
+    expect(prismaMock.webhookFailure.deleteMany).toHaveBeenCalled();
+  });
+
+  it("acks ack_drop as a non-retryable unknown handler", async () => {
+    const dropWork: WebhookWorkInput = {
+      ...work,
+      handler: WebhookFailureHandler.ack_drop,
+      topic: "unknown",
+    };
+
+    await expect(processWebhookWork(dropWork, graphql)).resolves.toEqual({
+      status: "failure",
+      code: WEBHOOK_ERROR_CODES.UNKNOWN_HANDLER,
+      message: "ack_drop is not a runnable handler",
+      retry: false,
+    });
+    expect(prismaMock.webhookFailure.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          status: WebhookFailureStatus.failed,
+        }),
+      }),
+    );
+  });
+
+  it("retries unexpected throws before max attempts", async () => {
+    handleOrdersCreate.mockRejectedValue(new Error("boom"));
+    prismaMock.webhookFailure.findUnique.mockResolvedValue({
+      attempts: 1,
+      maxAttempts: 5,
+    });
+
+    await expect(processWebhookWork(work, graphql)).resolves.toEqual({
+      status: "failure",
+      code: WEBHOOK_ERROR_CODES.UNEXPECTED,
+      message: "boom",
+      retry: true,
+    });
+  });
+
+  it("formats thrown Response bodies as HTTP errors", async () => {
+    handleOrdersCreate.mockRejectedValue(
+      new Response("gateway timeout", { status: 504, statusText: "Gateway Timeout" }),
+    );
+    prismaMock.webhookFailure.findUnique.mockResolvedValue({
+      attempts: 0,
+      maxAttempts: 5,
+    });
+
+    await expect(processWebhookWork(work, graphql)).resolves.toMatchObject({
+      status: "failure",
+      code: WEBHOOK_ERROR_CODES.UNEXPECTED,
+      message: "HTTP 504 Gateway Timeout: gateway timeout",
+    });
+  });
+});
+
+describe("enqueueWebhookWork", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.webhookFailure.upsert.mockResolvedValue({});
+    prismaMock.webhookFailure.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.webhookFailure.findUniqueOrThrow.mockResolvedValue({
+      id: "row-1",
+      status: WebhookFailureStatus.pending,
+    });
+  });
+
+  it("upserts work and resurrects a failed DLQ row", async () => {
+    await enqueueWebhookWork(work);
+    expect(prismaMock.webhookFailure.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          shop: work.shop,
+          handler: work.handler,
+          resourceId: BigInt(42),
+          status: WebhookFailureStatus.pending,
+          attempts: 0,
+        }),
+      }),
+    );
+    expect(prismaMock.webhookFailure.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        status: WebhookFailureStatus.failed,
+      }),
+      data: {
+        status: WebhookFailureStatus.pending,
+        attempts: 0,
+        completedAt: null,
+      },
+    });
+  });
+
+  it("falls back to update on a unique-key race", async () => {
+    const race = Object.assign(new Error("unique"), { code: "P2002" });
+    prismaMock.webhookFailure.upsert.mockRejectedValueOnce(race);
+    prismaMock.webhookFailure.update.mockResolvedValue({});
+
+    await enqueueWebhookWork(work);
+    expect(prismaMock.webhookFailure.update).toHaveBeenCalled();
+  });
+
+  it("rethrows unexpected upsert errors", async () => {
+    prismaMock.webhookFailure.upsert.mockRejectedValue(new Error("db down"));
+    await expect(enqueueWebhookWork(work)).rejects.toThrow("db down");
+  });
+
+  it("tryEnqueueWebhookWork swallows enqueue errors", async () => {
+    prismaMock.webhookFailure.upsert.mockRejectedValue(new Error("db down"));
+    await expect(tryEnqueueWebhookWork(work)).resolves.toEqual({
+      row: null,
+      error: "db down",
+    });
+  });
+});
+
+describe("recordAckDrop and listWebhookFailures", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.webhookFailure.upsert.mockResolvedValue({ id: "drop-1" });
+    prismaMock.webhookFailure.findMany.mockResolvedValue([]);
+  });
+
+  it("stores invalid messages as failed ack_drop rows", async () => {
+    await recordAckDrop({
+      shop: "record-loft.myshopify.com",
+      topic: "products/update",
+      resourceId: 9,
+      reason: "payload missing id",
+      payload: { title: "x" },
+    });
+    expect(prismaMock.webhookFailure.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          handler: WebhookFailureHandler.ack_drop,
+          status: WebhookFailureStatus.failed,
+          errorCode: "ack_drop",
+          errorMessage: "payload missing id",
+        }),
+      }),
+    );
+  });
+
+  it("lists failures for a shop with optional filters", async () => {
+    await listWebhookFailures("record-loft.myshopify.com", {
+      status: WebhookFailureStatus.failed,
+      handler: WebhookFailureHandler.orders_create,
+      limit: 10,
+    });
+    expect(prismaMock.webhookFailure.findMany).toHaveBeenCalledWith({
+      where: {
+        shop: "record-loft.myshopify.com",
+        status: { in: [WebhookFailureStatus.failed] },
+        handler: WebhookFailureHandler.orders_create,
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
     });
   });
 });

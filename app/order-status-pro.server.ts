@@ -28,6 +28,11 @@ const requestTimestampsByBucket: Record<RateLimitBucket, number[]> = {
   bulk: [],
 };
 
+export function resetRateLimitStateForTests() {
+  requestTimestampsByBucket.standard.length = 0;
+  requestTimestampsByBucket.bulk.length = 0;
+}
+
 const LOG_PREFIX = "[statuspro-api]";
 
 function rateLimitBucket(path: string, method: string): RateLimitBucket {
