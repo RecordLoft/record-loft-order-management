@@ -9,12 +9,16 @@ Embedded Shopify app for Record Loft. Merchants use it inside admin for Record P
 | Sessions, queued/failed jobs | **Aiven Postgres** |
 | Admin action extensions | **Shopify** (not this host) |
 
-## Docs
+## Docs and tests
 
-- [How the app is structured](docs/structure.md)
+Read these before changing behavior. Update them in the same change as the code.
+
+- [How the app is structured](docs/structure.md) (includes the test map)
 - [Webhooks and Pub/Sub](docs/webhooks.md)
 - [Deploy the Cloud Run worker](docs/deploy-webhooks.md)
 - [Webhook code](webhooks/README.md)
+
+Tests live in `tests/` (`vitest.config.ts` includes `tests/**/*.test.ts`). They mock Prisma, Shopify, and GCP — no live Aiven or Pub/Sub. Polaris UI and Shopify-hosted extensions are not covered.
 
 ## Local development
 

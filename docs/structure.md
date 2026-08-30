@@ -9,7 +9,11 @@ app/                    React Router app (Netlify)
   db.server.ts          Prisma + Aiven (pool max 1)
   record-planet.server.ts
   order-status-pro.server.ts
+  webhook-retry-publish.server.ts
 webhooks/               Cloud Run worker, queue, handlers
+tests/                  Vitest suite (`tests/**/*.test.ts`)
+vitest.config.ts        Node environment; excludes extensions
+docs/                   Architecture and deploy (keep in sync with code)
 .github/workflows/      CI (test + typecheck) and Cloud Run worker deploy
 netlify/functions/      warm-app (hits /api/health every 5 min)
 prisma/                 Schema + migrations
@@ -18,6 +22,8 @@ certs/aiven-ca.pem      TLS CA for Aiven
 shopify.app.toml        App URL, scopes, webhook destinations
 Dockerfile.worker       Image for Cloud Run
 ```
+
+Behavior changes must update **docs and tests in the same change**. Read this file and the linked docs before editing. Tests stay in `tests/` (not colocated), mock Prisma / Shopify / GCP, and do not need a live database. Polaris UI and Shopify-hosted extensions are not in the suite.
 
 ## Netlify routes
 
@@ -55,6 +61,27 @@ Record Planet queries filter by `session.shop`. `shopifyApp()` uses `AppDistribu
 - `extensions/ready-for-pickup` — admin action for ready-for-pickup.
 
 They ship with `shopify app deploy`, not Netlify. Each extension has its own `tsconfig.json`; the repo root typecheck excludes `extensions/`.
+
+## Tests
+
+Top-level `tests/` is the suite. `vitest.config.ts` includes `tests/**/*.test.ts`. CI and the pre-commit hook run `yarn test`. Use `yarn test:watch` while editing.
+
+| File | Covers |
+|---|---|
+| `parse-pubsub.test.ts` | Pub/Sub envelope, topics, ack-drop context |
+| `queue.test.ts` | Coalesce, claim/lease, enqueue, DLQ, retries |
+| `product-description.test.ts` | Hidden Shop-channel HTML, metafield sync |
+| `orders-create.handler.test.ts` | Order import, Record Planet fulfillment |
+| `shopify-fulfillment.test.ts` | Fulfillment-order paging and `REPORT_PROGRESS` |
+| `worker.test.ts` | Cloud Run HTTP: ack, 500 retry, health, shutdown |
+| `record-planet.test.ts` | Search helpers and `/app/record-planet` loader |
+| `order-status-pro.test.ts` | StatusPro client, cache, admin + inbound routes |
+| `webhook-retry-publish.test.ts` | Redrive to Pub/Sub |
+| `admin-routes.test.ts` | DLQ admin, pick list, HTTPS lifecycle |
+| `cron-health.test.ts` | Cron auth, `/api/health`, site URL |
+| `warm-app.test.ts` | Netlify keep-warm |
+
+When you change a route, handler, queue rule, or StatusPro contract, add or update the matching file. Do not invent a second test tree.
 
 ## CI
 
