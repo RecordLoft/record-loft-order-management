@@ -25,6 +25,79 @@ const REPORT_PROGRESS_MUTATION = `#graphql
   }
 `;
 
+const FULFILLMENT_ORDERS_PAGE_SIZE = 50;
+
+const FULFILLMENT_ORDERS_QUERY = `#graphql
+  query OrderFulfillmentOrders($orderId: ID!, $first: Int!, $after: String) {
+    order(id: $orderId) {
+      fulfillmentOrders(first: $first, after: $after) {
+        nodes {
+          id
+          status
+          deliveryMethod {
+            methodType
+          }
+          supportedActions {
+            action
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+`;
+
+export async function listFulfillmentOrdersForOrder(
+  graphql: GraphqlRequest,
+  orderGid: string,
+): Promise<
+  | { ok: true; fulfillmentOrders: FulfillmentOrderForProgress[] }
+  | { ok: false; retryable: boolean; code: string; message: string }
+> {
+  const fulfillmentOrders: FulfillmentOrderForProgress[] = [];
+  let after: string | null = null;
+
+  for (;;) {
+    const response = await graphql(FULFILLMENT_ORDERS_QUERY, {
+      variables: {
+        orderId: orderGid,
+        first: FULFILLMENT_ORDERS_PAGE_SIZE,
+        after,
+      },
+    });
+    const json = (await response.json()) as {
+      data?: {
+        order?: {
+          fulfillmentOrders?: {
+            nodes: FulfillmentOrderForProgress[];
+            pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+          };
+        };
+      };
+      errors?: unknown;
+    };
+    if (json.errors) {
+      return {
+        ok: false,
+        retryable: false,
+        code: "graphql_errors",
+        message: JSON.stringify(json.errors),
+      };
+    }
+    const connection = json.data?.order?.fulfillmentOrders;
+    fulfillmentOrders.push(...(connection?.nodes ?? []));
+    if (!connection?.pageInfo?.hasNextPage || !connection.pageInfo.endCursor) {
+      break;
+    }
+    after = connection.pageInfo.endCursor;
+  }
+
+  return { ok: true, fulfillmentOrders };
+}
+
 function supportsReportProgress(fo: FulfillmentOrderForProgress): boolean {
   return (
     fo.supportedActions?.some((a) => a.action === "REPORT_PROGRESS") ?? false

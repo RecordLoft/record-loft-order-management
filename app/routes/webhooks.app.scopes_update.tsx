@@ -13,7 +13,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 id: session.id
             },
             data: {
-                scope: current.toString(),
+                scope: current.join(","),
             },
         });
     }

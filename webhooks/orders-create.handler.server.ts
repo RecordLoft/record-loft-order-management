@@ -1,6 +1,7 @@
 import { prisma } from "../app/db.server";
 import type { GraphqlRequest } from "./product-description.server";
 import {
+  listFulfillmentOrdersForOrder,
   markFulfillmentOrdersInProgress,
   type FulfillmentOrderForProgress,
 } from "./shopify-fulfillment.server";
@@ -101,21 +102,7 @@ export async function handleOrdersCreate(
     );
     const response = await graphql(
       `
-        query getOrderEnrichment($orderId: ID!, $productIds: [ID!]!) {
-          order(id: $orderId) {
-            fulfillmentOrders(first: 20) {
-              nodes {
-                id
-                status
-                deliveryMethod {
-                  methodType
-                }
-                supportedActions {
-                  action
-                }
-              }
-            }
-          }
+        query getOrderEnrichment($productIds: [ID!]!) {
           nodes(ids: $productIds) {
             ... on Product {
               id
@@ -135,7 +122,6 @@ export async function handleOrdersCreate(
       `,
       {
         variables: {
-          orderId: `gid://shopify/Order/${id}`,
           productIds: productIds.map((pid) => `gid://shopify/Product/${pid}`),
         },
       },
@@ -149,11 +135,6 @@ export async function handleOrdersCreate(
           category?: { name?: string | null } | null;
           storeSection?: { value?: string | null } | null;
         } | null>;
-        order?: {
-          fulfillmentOrders?: {
-            nodes: FulfillmentOrderForProgress[];
-          };
-        };
       };
       errors?: unknown;
     };
@@ -163,6 +144,7 @@ export async function handleOrdersCreate(
         outcome: "error",
         code: "graphql_errors",
         message: JSON.stringify(json.errors),
+        retry: false,
       };
     }
 
@@ -176,7 +158,19 @@ export async function handleOrdersCreate(
       });
     }
 
-    fulfillmentOrders = json.data?.order?.fulfillmentOrders?.nodes ?? [];
+    const listed = await listFulfillmentOrdersForOrder(
+      graphql,
+      `gid://shopify/Order/${id}`,
+    );
+    if (!listed.ok) {
+      return {
+        outcome: "error",
+        code: listed.code,
+        message: listed.message,
+        retry: listed.retryable,
+      };
+    }
+    fulfillmentOrders = listed.fulfillmentOrders;
 
     deliveryMethod =
       fulfillmentOrders[0]?.deliveryMethod?.methodType?.toLowerCase() ?? null;
@@ -283,6 +277,7 @@ export async function handleOrdersCreate(
         outcome: "error",
         code: progress.code,
         message: progress.message,
+        retry: progress.retryable,
       };
     }
 

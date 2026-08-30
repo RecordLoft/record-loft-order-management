@@ -40,6 +40,7 @@ const RETRYING_STATUSES: WebhookFailureStatus[] = [
 const HANDLER_LABELS = {
   orders_create: "Orders create",
   product_description_sync: "Product description",
+  ack_drop: "Dropped (invalid)",
 } as const satisfies Record<WebhookFailureHandler, string>;
 
 const REFRESH_MS = 10_000;
@@ -336,7 +337,8 @@ export default function WebhookDeadLettersPage() {
                       job.handler,
                       job.resourceId,
                     );
-                    const canRedrive = job.status === "failed";
+                    const canRedrive =
+                      job.status === "failed" && job.handler !== "ack_drop";
                     const busy = redrivingAll || redrivingId === job.id;
 
                     return (

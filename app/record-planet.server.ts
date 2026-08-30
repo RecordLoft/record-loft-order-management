@@ -64,13 +64,17 @@ const CUSTOMER_MATCH_SQL = (pattern: string, phoneDigitPattern: string | null) =
   `;
 };
 
-export async function matchingLineItemIds(search: string): Promise<bigint[]> {
+export async function matchingLineItemIds(
+  shop: string,
+  search: string,
+): Promise<bigint[]> {
   const pattern = toIlikePattern(search);
   const rows = await prisma.$queryRaw<{ id: bigint }[]>`
     SELECT li.id
     FROM "LineItem" li
     INNER JOIN "Order" o ON li."orderId" = o.id
-    WHERE o."deliveryMethod" = 'recordPlanet'
+    WHERE o.shop = ${shop}
+      AND o."deliveryMethod" = 'recordPlanet'
       AND (
         li.title ILIKE ${pattern}
         OR COALESCE(li.properties::text, '') ILIKE ${pattern}
@@ -80,6 +84,7 @@ export async function matchingLineItemIds(search: string): Promise<bigint[]> {
 }
 
 export async function matchingOrderIdsByCustomer(
+  shop: string,
   search: string,
 ): Promise<bigint[]> {
   const pattern = toIlikePattern(search);
@@ -90,26 +95,30 @@ export async function matchingOrderIdsByCustomer(
     SELECT DISTINCT o.id
     FROM "Order" o
     INNER JOIN "Customer" c ON o."customerId" = c.id
-    WHERE o."deliveryMethod" = 'recordPlanet'
+    WHERE o.shop = ${shop}
+      AND o."deliveryMethod" = 'recordPlanet'
       AND (${customerMatch})
   `;
   return rows.map((row) => row.id);
 }
 
 export async function matchingOrderIdsByOrderNumber(
+  shop: string,
   search: string,
 ): Promise<bigint[]> {
   const pattern = toIlikePattern(search);
   const rows = await prisma.$queryRaw<{ id: bigint }[]>`
     SELECT o.id
     FROM "Order" o
-    WHERE o."deliveryMethod" = 'recordPlanet'
+    WHERE o.shop = ${shop}
+      AND o."deliveryMethod" = 'recordPlanet'
       AND o."orderNumber"::text ILIKE ${pattern}
   `;
   return rows.map((row) => row.id);
 }
 
 export async function matchingOrderIdsByLineItem(
+  shop: string,
   search: string,
 ): Promise<bigint[]> {
   const pattern = toIlikePattern(search);
@@ -117,7 +126,8 @@ export async function matchingOrderIdsByLineItem(
     SELECT DISTINCT o.id
     FROM "Order" o
     INNER JOIN "LineItem" li ON li."orderId" = o.id
-    WHERE o."deliveryMethod" = 'recordPlanet'
+    WHERE o.shop = ${shop}
+      AND o."deliveryMethod" = 'recordPlanet'
       AND (
         li.title ILIKE ${pattern}
         OR COALESCE(li.properties::text, '') ILIKE ${pattern}
@@ -126,11 +136,14 @@ export async function matchingOrderIdsByLineItem(
   return rows.map((row) => row.id);
 }
 
-export async function matchingOrderIds(search: string): Promise<bigint[]> {
+export async function matchingOrderIds(
+  shop: string,
+  search: string,
+): Promise<bigint[]> {
   const [byCustomer, byOrderNumber, byLineItem] = await Promise.all([
-    matchingOrderIdsByCustomer(search),
-    matchingOrderIdsByOrderNumber(search),
-    matchingOrderIdsByLineItem(search),
+    matchingOrderIdsByCustomer(shop, search),
+    matchingOrderIdsByOrderNumber(shop, search),
+    matchingOrderIdsByLineItem(shop, search),
   ]);
 
   return [
@@ -147,6 +160,7 @@ export type RecordPlanetSearchMatch = {
 };
 
 export async function getRecordPlanetSearchMatch(
+  shop: string,
   search: string,
 ): Promise<RecordPlanetSearchMatch | null> {
   const q = search.trim();
@@ -158,10 +172,10 @@ export async function getRecordPlanetSearchMatch(
     customerOrderIds,
     orderNumberOrderIds,
   ] = await Promise.all([
-    matchingOrderIds(q),
-    matchingLineItemIds(q),
-    matchingOrderIdsByCustomer(q),
-    matchingOrderIdsByOrderNumber(q),
+    matchingOrderIds(shop, q),
+    matchingLineItemIds(shop, q),
+    matchingOrderIdsByCustomer(shop, q),
+    matchingOrderIdsByOrderNumber(shop, q),
   ]);
 
   return {
@@ -176,13 +190,17 @@ export async function getRecordPlanetSearchMatch(
 }
 
 export async function recordPlanetOrderWhere(
+  shop: string,
   search: string,
 ): Promise<Prisma.OrderWhereInput> {
-  const base: Prisma.OrderWhereInput = { deliveryMethod: "recordPlanet" };
+  const base: Prisma.OrderWhereInput = {
+    shop,
+    deliveryMethod: "recordPlanet",
+  };
   const q = search.trim();
   if (!q) return base;
 
-  const ids = await matchingOrderIds(q);
+  const ids = await matchingOrderIds(shop, q);
   if (ids.length === 0) {
     return { ...base, id: { in: [BigInt(-1)] } };
   }

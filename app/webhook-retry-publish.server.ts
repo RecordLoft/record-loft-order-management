@@ -14,7 +14,9 @@ const PROJECT_ID = process.env.GCP_PROJECT_ID ?? "record-loft";
 const TOKEN_AUD = "https://oauth2.googleapis.com/token";
 const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
 
-const PUBSUB_TOPIC_BY_HANDLER: Record<WebhookFailureHandler, string> = {
+const PUBSUB_TOPIC_BY_HANDLER: Partial<
+  Record<WebhookFailureHandler, string>
+> = {
   [WebhookFailureHandler.product_description_sync]: "shopify-products",
   [WebhookFailureHandler.orders_create]: "shopify-orders",
 };
@@ -143,6 +145,7 @@ export async function republishWebhookFailures(
     where: {
       shop,
       status: WebhookFailureStatus.failed,
+      handler: { not: WebhookFailureHandler.ack_drop },
       ...(options.ids ? { id: { in: options.ids } } : {}),
     },
     orderBy: { updatedAt: "asc" },
@@ -165,6 +168,7 @@ export async function republishWebhookFailures(
   const byTopic = new Map<string, FailureToPublish[]>();
   for (const row of rows) {
     const topic = PUBSUB_TOPIC_BY_HANDLER[row.handler];
+    if (!topic) continue;
     const list = byTopic.get(topic) ?? [];
     list.push(row);
     byTopic.set(topic, list);

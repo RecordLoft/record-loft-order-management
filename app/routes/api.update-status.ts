@@ -4,6 +4,8 @@ import {
   RateLimitError,
 } from "../order-status-pro.server";
 import type { ActionFunctionArgs } from "react-router";
+import prisma from "../db.server";
+import { authenticate } from "../shopify.server";
 
 function parseOrderIds(idsRaw: string): bigint[] {
   return idsRaw
@@ -21,6 +23,7 @@ function parseOrderIds(idsRaw: string): bigint[] {
 }
 
 export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
   const formData = await request.formData();
   const idsRaw = formData.get("ids");
   const statusCode = formData.get("status_code");
@@ -44,6 +47,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json(
       { success: false, error: "No valid order IDs" },
       { status: 400 },
+    );
+  }
+
+  const owned = await prisma.order.count({
+    where: { id: { in: orderIds }, shop: session.shop },
+  });
+  if (owned !== orderIds.length) {
+    return Response.json(
+      { success: false, error: "One or more orders were not found" },
+      { status: 404 },
     );
   }
 

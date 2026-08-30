@@ -69,7 +69,13 @@ async function runHandler(
   graphql: GraphqlRequest,
 ): Promise<
   | { type: "success"; outcome: "completed" | "skipped"; detail: string }
-  | { type: "error"; code: string; message: string; detail?: string }
+  | {
+      type: "error";
+      code: string;
+      message: string;
+      detail?: string;
+      retry?: boolean;
+    }
 > {
   switch (work.handler) {
     case WebhookFailureHandler.product_description_sync:
@@ -84,11 +90,19 @@ async function runHandler(
       return mapHandlerResult(
         await handleOrdersCreate(work.shop, work.payload as never, graphql),
       );
+    case WebhookFailureHandler.ack_drop:
+      return {
+        type: "error",
+        code: WEBHOOK_ERROR_CODES.UNKNOWN_HANDLER,
+        message: "ack_drop is not a runnable handler",
+        retry: false,
+      };
     default:
       return {
         type: "error",
         code: WEBHOOK_ERROR_CODES.UNKNOWN_HANDLER,
         message: `Unknown handler: ${work.handler}`,
+        retry: false,
       };
   }
 }
@@ -97,7 +111,13 @@ function mapHandlerResult(
   result: Awaited<ReturnType<typeof handleProductDescriptionSync>>,
 ):
   | { type: "success"; outcome: "completed" | "skipped"; detail: string }
-  | { type: "error"; code: string; message: string; detail?: string } {
+  | {
+      type: "error";
+      code: string;
+      message: string;
+      detail?: string;
+      retry?: boolean;
+    } {
   if (result.outcome === "completed") {
     return { type: "success", outcome: "completed", detail: result.detail };
   }
@@ -109,6 +129,7 @@ function mapHandlerResult(
     code: result.code,
     message: result.message,
     detail: "error",
+    retry: result.retry,
   };
 }
 
@@ -314,8 +335,9 @@ async function recordFailureFromWork(
   outcome: string | null | undefined,
   attempts: number,
   maxAttempts: number,
+  forceFailed = false,
 ) {
-  const exhausted = attempts >= maxAttempts;
+  const exhausted = forceFailed || attempts >= maxAttempts;
   await upsertWebhookFailure(input, errorCode, errorMessage, {
     outcome: outcome ?? null,
     attempts,
@@ -358,7 +380,9 @@ export async function processWebhookWork(
       };
     }
 
+    const retryable = result.retry !== false;
     const { attempts, maxAttempts, retry } = await nextAttempt(input);
+    const shouldRetry = retryable && retry;
     await recordFailureFromWork(
       input,
       result.code,
@@ -366,12 +390,13 @@ export async function processWebhookWork(
       result.detail,
       attempts,
       maxAttempts,
+      !retryable,
     );
     return {
       status: "failure",
       code: result.code,
       message: result.message,
-      retry,
+      retry: shouldRetry,
     };
   } catch (error) {
     const message = await formatError(error);
@@ -391,6 +416,46 @@ export async function processWebhookWork(
       retry,
     };
   }
+}
+
+/** Mark the coalesced row in-flight so a second Cloud Run instance waits. */
+export async function claimWebhookWork(input: WebhookWorkInput): Promise<boolean> {
+  const result = await prisma.webhookFailure.updateMany({
+    where: {
+      shop: input.shop,
+      handler: input.handler,
+      resourceId: resourceIdBigInt(input),
+      status: { not: WebhookFailureStatus.processing },
+    },
+    data: { status: WebhookFailureStatus.processing },
+  });
+  return result.count > 0;
+}
+
+/** Persist a message the worker 200-acks so it does not vanish from the DLQ. */
+export async function recordAckDrop(input: {
+  shop?: string;
+  topic?: string;
+  resourceId?: number | bigint;
+  reason: string;
+  payload?: unknown;
+}) {
+  return upsertWebhookFailure(
+    {
+      shop: input.shop || "_unknown",
+      handler: WebhookFailureHandler.ack_drop,
+      topic: input.topic || "unknown",
+      resourceId: input.resourceId ?? 0,
+      payload: input.payload ?? { reason: input.reason },
+    },
+    "ack_drop",
+    input.reason,
+    {
+      status: WebhookFailureStatus.failed,
+      attempts: 0,
+      completedAt: new Date(),
+    },
+  );
 }
 
 export async function listWebhookFailures(

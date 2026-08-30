@@ -10,7 +10,7 @@ embedded = true
 scopes = "read_products, write_products, read_publications, read_metaobjects, read_orders, read_customers, read_fulfillments, read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders, read_assigned_fulfillment_orders, read_third_party_fulfillment_orders"
 
 [webhooks]
-api_version = "2026-07"
+api_version = "2026-04"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/uninstalled"

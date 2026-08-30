@@ -25,6 +25,7 @@ export function StatusUpdateModal({
 	onSuccess,
 }: StatusUpdateModalProps) {
 	const fetcher = useFetcher();
+	const choicesFetcher = useFetcher<StatusChoice[] | { error?: string }>();
 	const [newStatus, setNewStatus] = useState<string[]>([]);
 	const [statusChoices, setStatusChoices] = useState<StatusChoice[]>([]);
 	const [isLoadingChoices, setIsLoadingChoices] = useState(false);
@@ -50,32 +51,29 @@ export function StatusUpdateModal({
 
 	useEffect(() => {
 		if (!representativeOrderId || isOverLimit) return;
-
 		setIsLoadingChoices(true);
 		setChoicesError(null);
-
-		fetch(
+		choicesFetcher.load(
 			`/api/viable-statuses?id=${encodeURIComponent(representativeOrderId)}`,
-		)
-			.then(async (res) => {
-				const data = await res.json();
-				if (!res.ok) {
-					throw new Error(
-						typeof data?.error === "string" ? data.error : "Could not load statuses",
-					);
-				}
-				if (!Array.isArray(data)) {
-					throw new Error("Unexpected response from status API");
-				}
-				setStatusChoices(data);
-			})
-			.catch((error: unknown) => {
-				setChoicesError(
-					error instanceof Error ? error.message : "Could not load statuses",
-				);
-			})
-			.finally(() => setIsLoadingChoices(false));
+		);
 	}, [isOverLimit, representativeOrderId]);
+
+	useEffect(() => {
+		if (choicesFetcher.state !== "idle") return;
+		if (!choicesFetcher.data) return;
+
+		setIsLoadingChoices(false);
+		const data = choicesFetcher.data;
+		if (Array.isArray(data)) {
+			setStatusChoices(data);
+			setChoicesError(null);
+			return;
+		}
+		setStatusChoices([]);
+		setChoicesError(
+			typeof data.error === "string" ? data.error : "Could not load statuses",
+		);
+	}, [choicesFetcher.state, choicesFetcher.data]);
 
 	const handleAction = useCallback(() => {
 		const statusCode = newStatus[0];

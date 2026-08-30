@@ -7,13 +7,19 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { closeDb } from "../app/db.server";
+import { closeDb, prisma } from "../app/db.server";
 import {
+  ackDropContext,
   isAdminRetry,
   parsePubSubPush,
   type PubSubPushEnvelope,
 } from "./parse-pubsub";
-import { processWebhookWork, tryEnqueueWebhookWork } from "./queue.server";
+import {
+  claimWebhookWork,
+  processWebhookWork,
+  recordAckDrop,
+  tryEnqueueWebhookWork,
+} from "./queue.server";
 
 const PORT = Number(process.env.PORT || 8080);
 const ALLOWED_TOPICS = new Set(
@@ -45,11 +51,25 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(json);
 }
 
+async function persistAckDrop(
+  envelope: PubSubPushEnvelope,
+  reason: string,
+): Promise<void> {
+  const context = ackDropContext(envelope);
+  try {
+    await recordAckDrop({ ...context, reason });
+  } catch (error) {
+    console.error(`[pubsub-worker] ack-drop persist failed reason=${reason}`, error);
+  }
+}
+
 async function handlePush(req: IncomingMessage, res: ServerResponse) {
   let envelope: PubSubPushEnvelope;
   try {
     envelope = (await readJson(req)) as PubSubPushEnvelope;
   } catch {
+    console.warn("[pubsub-worker] ack-drop reason=invalid json");
+    await persistAckDrop({}, "invalid json");
     send(res, 200, { status: "ignored", reason: "invalid json" });
     return;
   }
@@ -57,6 +77,7 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   const parsed = parsePubSubPush(envelope ?? {});
   if (!parsed.ok) {
     console.warn(`[pubsub-worker] ack-drop reason=${parsed.reason}`);
+    await persistAckDrop(envelope ?? {}, parsed.reason);
     send(res, 200, { status: "ignored", reason: parsed.reason });
     return;
   }
@@ -66,15 +87,37 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
     ? "admin-retry"
     : "shopify-publish";
   if (!ALLOWED_TOPICS.has(topic)) {
+    const reason = `topic ${topic} not allowed`;
     console.log(
       `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId} source=${source}`,
     );
-    send(res, 200, { status: "ignored", reason: `topic ${topic} not allowed` });
+    await persistAckDrop(envelope, reason);
+    send(res, 200, { status: "ignored", reason });
     return;
   }
 
   const started = Date.now();
   const { error: enqueueError } = await tryEnqueueWebhookWork(work);
+  if (enqueueError) {
+    console.error(
+      `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
+        `messageId=${messageId} source=${source} outcome=enqueue_failed ` +
+        `message=${enqueueError} latencyMs=${Date.now() - started}`,
+    );
+    send(res, 500, { status: "enqueue_failed", message: enqueueError });
+    return;
+  }
+
+  const claimed = await claimWebhookWork(work);
+  if (!claimed) {
+    console.log(
+      `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
+        `messageId=${messageId} source=${source} outcome=busy latencyMs=${Date.now() - started}`,
+    );
+    send(res, 500, { status: "busy" });
+    return;
+  }
+
   const result = await processWebhookWork(work);
   const latencyMs = Date.now() - started;
 
@@ -82,8 +125,7 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
     console.log(
       `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
         `messageId=${messageId} source=${source} outcome=${result.outcome} ` +
-        `detail=${result.detail} latencyMs=${latencyMs}` +
-        (enqueueError ? ` enqueueError=${enqueueError}` : ""),
+        `detail=${result.detail} latencyMs=${latencyMs}`,
     );
     send(res, 200, { status: result.outcome, latencyMs });
     return;
@@ -109,17 +151,27 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
+let shuttingDown = false;
+let inFlight = 0;
+
 const server = createServer((req, res) => {
   const url = new URL(
     req.url ?? "/",
     `http://${req.headers.host ?? "localhost"}`,
   );
 
-  if (
-    req.method === "GET" &&
-    (url.pathname === "/" || url.pathname === "/health")
-  ) {
+  if (req.method === "GET" && url.pathname === "/") {
     send(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/health") {
+    prisma.$queryRaw`SELECT 1`
+      .then(() => send(res, 200, { ok: true, db: true }))
+      .catch((error: unknown) => {
+        console.error("[pubsub-worker] health db failed", error);
+        send(res, 503, { ok: false, db: false });
+      });
     return;
   }
 
@@ -127,10 +179,19 @@ const server = createServer((req, res) => {
     req.method === "POST" &&
     (url.pathname === "/" || url.pathname === "/pubsub")
   ) {
-    handlePush(req, res).catch((error: unknown) => {
-      console.error("[pubsub-worker] unhandled", error);
-      send(res, 500, { status: "error" });
-    });
+    if (shuttingDown) {
+      send(res, 503, { status: "shutting_down" });
+      return;
+    }
+    inFlight += 1;
+    handlePush(req, res)
+      .catch((error: unknown) => {
+        console.error("[pubsub-worker] unhandled", error);
+        send(res, 500, { status: "error" });
+      })
+      .finally(() => {
+        inFlight -= 1;
+      });
     return;
   }
 
@@ -143,7 +204,18 @@ server.listen(PORT, "0.0.0.0", () => {
   );
 });
 
-process.on("SIGTERM", () => {
-  console.log("[pubsub-worker] SIGTERM, closing db");
+function drainAndExit() {
+  if (inFlight > 0) {
+    setTimeout(drainAndExit, 50);
+    return;
+  }
   closeDb().finally(() => process.exit(0));
+}
+
+process.on("SIGTERM", () => {
+  console.log("[pubsub-worker] SIGTERM, draining");
+  shuttingDown = true;
+  server.close(() => {
+    drainAndExit();
+  });
 });

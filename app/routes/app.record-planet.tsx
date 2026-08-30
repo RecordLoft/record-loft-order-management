@@ -164,8 +164,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const searchQuery = new URL(request.url).searchParams.get("q")?.trim() ?? "";
 
   const [orderWhere, searchMatch] = await Promise.all([
-    recordPlanetOrderWhere(searchQuery),
-    getRecordPlanetSearchMatch(searchQuery),
+    recordPlanetOrderWhere(session.shop, searchQuery),
+    getRecordPlanetSearchMatch(session.shop, searchQuery),
   ]);
 
   const ordersRaw = await prisma.order.findMany({

@@ -75,6 +75,37 @@ export function isAdminRetry(
   return attribute(attributes, ADMIN_RETRY_ATTRIBUTE) === ADMIN_RETRY_VALUE;
 }
 
+/** Best-effort shop / topic / id from a push we are about to ack-drop. */
+export function ackDropContext(envelope: PubSubPushEnvelope): {
+  shop?: string;
+  topic?: string;
+  resourceId?: number;
+  payload?: unknown;
+} {
+  const attributes = envelope.message?.attributes;
+  const shop = attribute(attributes, "X-Shopify-Shop-Domain");
+  const topic = attribute(attributes, "X-Shopify-Topic");
+  if (!envelope.message?.data) {
+    return { shop, topic };
+  }
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(envelope.message.data, "base64").toString("utf8"),
+    ) as unknown;
+    const payload = unwrapShopifyPayload(decoded) ?? undefined;
+    const rawId = payload?.id;
+    const resourceId =
+      typeof rawId === "number"
+        ? rawId
+        : typeof rawId === "string" && /^\d+$/.test(rawId)
+          ? Number(rawId)
+          : undefined;
+    return { shop, topic, resourceId, payload };
+  } catch {
+    return { shop, topic };
+  }
+}
+
 export function parsePubSubPush(
   envelope: PubSubPushEnvelope,
 ): { ok: true; parsed: ParsedPubSubWebhook } | { ok: false; reason: string } {

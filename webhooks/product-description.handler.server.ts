@@ -20,6 +20,7 @@ function mapSyncResult(result: DescriptionSyncResult): WebhookHandlerResult {
     outcome: "error",
     code: result.code ?? "sync_error",
     message: result.message,
+    retry: result.code !== "product_not_found",
   };
 }
 

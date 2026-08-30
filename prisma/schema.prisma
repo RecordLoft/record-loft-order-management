@@ -81,6 +81,7 @@ enum WebhookFailureStatus {
 enum WebhookFailureHandler {
   product_description_sync
   orders_create
+  ack_drop
 }
 
 /// Queued and failed webhook work — successes are deleted after processing.

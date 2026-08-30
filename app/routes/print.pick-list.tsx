@@ -2,13 +2,28 @@ import { BlockStack, Box, Card, Divider, Text } from "@shopify/polaris";
 import { prisma } from "../db.server";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-	const url = new URL(request.url);
-	const ids = url.searchParams.get("ids")?.split(",").map(Number) || [];
+import { authenticate } from "../shopify.server";
 
-	// Fetch all individual line items
+function parseOrderIds(raw: string | null): bigint[] {
+	if (!raw) return [];
+	const ids: bigint[] = [];
+	for (const part of raw.split(",")) {
+		const segment = part.trim().split("/").pop() || "";
+		if (!/^\d+$/.test(segment)) continue;
+		ids.push(BigInt(segment));
+	}
+	return ids;
+}
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+	const { session } = await authenticate.admin(request);
+	const ids = parseOrderIds(new URL(request.url).searchParams.get("ids"));
+
 	const lineItems = await prisma.lineItem.findMany({
-		where: { orderId: { in: ids } },
+		where: {
+			orderId: { in: ids },
+			order: { shop: session.shop },
+		},
 		include: { order: true },
 	});
 
@@ -50,7 +65,7 @@ export default function BulkPickList() {
 					<Card key={sectionName}>
 						<Box padding="400">
 							<BlockStack gap="300">
-								<Text variant="headingMd" as="h2" tone="brand">Section: {sectionName}</Text>
+								<Text variant="headingMd" as="h2">Section: {sectionName}</Text>
 								<Divider />
 								<table style={{ width: '100%', borderCollapse: 'collapse' }}>
 									<thead>

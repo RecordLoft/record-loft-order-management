@@ -128,7 +128,7 @@ gcloud pubsub topics publish shopify-products \
 
 `X-Retry-Source=admin` is a log tag (same as Webhook DLQ Redrive). It is not required for the worker to accept the message. Topic publish IAM is the gate.
 
-Use a real product id. A fake id (`1`) returns `product_not_found` and Pub/Sub will retry until you seek the subscription.
+Use a real product id. A fake id (`1`) is `product_not_found`: the worker 200-acks and the row stays in the Webhook DLQ (no Pub/Sub retry loop).
 
 Shopify CLI `webhook trigger` to `pubsub://record-loft:shopify-products` tests publish. The CLI shop has no offline session, so GraphQL will fail; that does not mean the subscription is wrong.
 
