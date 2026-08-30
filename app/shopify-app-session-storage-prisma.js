@@ -25,16 +25,9 @@ class PrismaSessionStorage {
     if (this.getSessionTable() === undefined) {
       throw new Error(`PrismaClient does not have a ${this.tableName} table`);
     }
-    // Do not throw here — an unhandled rejection kills the Cloud Run process.
-    // Aiven timeouts are transient; requests retry via ensureReady().
-    this.ready = this.pollForTable()
-      .then(() => true)
-      .catch((error) => {
-        console.error(
-          `[session-storage] initial ${this.tableName} probe failed: ${error}`,
-        );
-        return false;
-      });
+    // Probe on first request, not at import. Cloud Run health checks must
+    // succeed without taking an Aiven slot during a revision rollout.
+    this.ready = Promise.resolve(false);
   }
   async storeSession(session) {
     await this.ensureReady();

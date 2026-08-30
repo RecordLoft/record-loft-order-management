@@ -3,6 +3,7 @@
  * Manual fallback: docs/deploy-webhooks.md
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { closeDb } from "../app/db.server";
 import {
   parsePubSubPush,
   verifyShopifyHmac,
@@ -130,4 +131,9 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(
     `[pubsub-worker] listening on ${PORT} topics=${[...ALLOWED_TOPICS].join(",")}`,
   );
+});
+
+process.on("SIGTERM", () => {
+  console.log("[pubsub-worker] SIGTERM, closing db");
+  closeDb().finally(() => process.exit(0));
 });

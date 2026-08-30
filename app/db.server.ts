@@ -2,6 +2,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
+import { Pool } from "pg";
 import { PrismaClient } from "../generated/prisma/client";
 
 declare global {
@@ -40,15 +41,21 @@ function pgPoolConfig() {
   };
 }
 
+const pool = new Pool(pgPoolConfig());
+
 function createPrismaClient(): PrismaClient {
-  const adapter = new PrismaPg(pgPoolConfig());
-  return new PrismaClient({ adapter });
+  return new PrismaClient({ adapter: new PrismaPg(pool) });
 }
 
 export const prisma = globalThis.__recordLoftPrisma ?? createPrismaClient();
 
 if (process.env.NODE_ENV !== "production") {
   globalThis.__recordLoftPrisma = prisma;
+}
+
+export async function closeDb(): Promise<void> {
+  await prisma.$disconnect().catch(() => undefined);
+  await pool.end().catch(() => undefined);
 }
 
 export default prisma;
