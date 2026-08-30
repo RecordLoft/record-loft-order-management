@@ -142,9 +142,7 @@ export async function republishWebhookFailures(
   const rows = await prisma.webhookFailure.findMany({
     where: {
       shop,
-      status: {
-        in: [WebhookFailureStatus.pending, WebhookFailureStatus.failed],
-      },
+      status: WebhookFailureStatus.failed,
       ...(options.ids ? { id: { in: options.ids } } : {}),
     },
     orderBy: { updatedAt: "asc" },
@@ -180,6 +178,7 @@ export async function republishWebhookFailures(
     where: { id: { in: rows.map((row) => row.id) } },
     data: {
       status: WebhookFailureStatus.pending,
+      attempts: 0,
       completedAt: null,
     },
   });

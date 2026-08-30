@@ -241,35 +241,40 @@ export async function enqueueWebhookWork(input: WebhookWorkInput) {
         resourceGid: fields.resourceGid ?? undefined,
         webhookId: fields.webhookId ?? undefined,
         payload: fields.payload,
-        status: fields.status,
-        outcome: fields.outcome,
-        errorCode: fields.errorCode,
-        errorMessage: fields.errorMessage,
-        attempts: fields.attempts,
-        lastAttemptAt: fields.lastAttemptAt,
-        completedAt: fields.completedAt,
       },
     });
   } catch (error) {
     // Concurrent webhooks for the same product race the unique key.
     if (!isPrismaErrorCode(error, "P2002")) throw error;
-    return prisma.webhookFailure.update({
+    await prisma.webhookFailure.update({
       where: { shop_handler_resourceId: unique },
       data: {
         topic: fields.topic,
         resourceGid: fields.resourceGid ?? undefined,
         webhookId: fields.webhookId ?? undefined,
         payload: fields.payload,
-        status: fields.status,
-        outcome: fields.outcome,
-        errorCode: fields.errorCode,
-        errorMessage: fields.errorMessage,
-        attempts: fields.attempts,
-        lastAttemptAt: fields.lastAttemptAt,
-        completedAt: fields.completedAt,
       },
     });
   }
+
+  // A new Shopify event on a DLQ row gets a full retry cycle, same as Redrive.
+  await prisma.webhookFailure.updateMany({
+    where: {
+      shop: unique.shop,
+      handler: unique.handler,
+      resourceId: unique.resourceId,
+      status: WebhookFailureStatus.failed,
+    },
+    data: {
+      status: WebhookFailureStatus.pending,
+      attempts: 0,
+      completedAt: null,
+    },
+  });
+
+  return prisma.webhookFailure.findUniqueOrThrow({
+    where: { shop_handler_resourceId: unique },
+  });
 }
 
 /** Never throw to the webhook HTTP handler — Shopify 500s retry and amplify load. */
@@ -284,6 +289,22 @@ export async function tryEnqueueWebhookWork(input: WebhookWorkInput) {
     );
     return { row: null, error: message };
   }
+}
+
+async function nextAttempt(input: WebhookWorkInput) {
+  const row = await prisma.webhookFailure.findUnique({
+    where: {
+      shop_handler_resourceId: {
+        shop: input.shop,
+        handler: input.handler,
+        resourceId: resourceIdBigInt(input),
+      },
+    },
+    select: { attempts: true, maxAttempts: true },
+  });
+  const attempts = (row?.attempts ?? 0) + 1;
+  const maxAttempts = row?.maxAttempts ?? 5;
+  return { attempts, maxAttempts, retry: attempts < maxAttempts };
 }
 
 async function recordFailureFromWork(
@@ -307,7 +328,7 @@ async function recordFailureFromWork(
 
 export type ProcessWebhookWorkResult =
   | { status: "success"; outcome: "completed" | "skipped"; detail: string }
-  | { status: "failure"; code: string; message: string };
+  | { status: "failure"; code: string; message: string; retry: boolean };
 
 /** Run the handler immediately on Cloud Run. */
 export async function processWebhookWork(
@@ -322,6 +343,7 @@ export async function processWebhookWork(
       status: "failure",
       code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
       message: "No offline session for shop",
+      retry: false,
     };
   }
 
@@ -336,33 +358,37 @@ export async function processWebhookWork(
       };
     }
 
+    const { attempts, maxAttempts, retry } = await nextAttempt(input);
     await recordFailureFromWork(
       input,
       result.code,
       result.message,
       result.detail,
-      1,
-      5,
+      attempts,
+      maxAttempts,
     );
     return {
       status: "failure",
       code: result.code,
       message: result.message,
+      retry,
     };
   } catch (error) {
     const message = await formatError(error);
+    const { attempts, maxAttempts, retry } = await nextAttempt(input);
     await recordFailureFromWork(
       input,
       WEBHOOK_ERROR_CODES.UNEXPECTED,
       message,
       null,
-      1,
-      5,
+      attempts,
+      maxAttempts,
     );
     return {
       status: "failure",
       code: WEBHOOK_ERROR_CODES.UNEXPECTED,
       message,
+      retry,
     };
   }
 }
@@ -371,14 +397,16 @@ export async function listWebhookFailures(
   shop: string,
   options?: {
     status?: WebhookFailureStatus;
+    statuses?: WebhookFailureStatus[];
     handler?: WebhookFailureHandler;
     limit?: number;
   },
 ) {
+  const statuses = options?.statuses ?? (options?.status ? [options.status] : undefined);
   return prisma.webhookFailure.findMany({
     where: {
       shop,
-      ...(options?.status ? { status: options.status } : {}),
+      ...(statuses ? { status: { in: statuses } } : {}),
       ...(options?.handler ? { handler: options.handler } : {}),
     },
     orderBy: { updatedAt: "desc" },

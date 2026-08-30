@@ -29,11 +29,13 @@ import { authenticate } from "../shopify.server";
 import { republishWebhookFailures } from "../webhook-retry-publish.server";
 import { listWebhookFailures } from "../../webhooks/queue.server";
 
-const JOB_STATUSES = [
+const VIEW_FILTERS = ["failed", "retrying", "all"] as const;
+type ViewFilter = (typeof VIEW_FILTERS)[number];
+
+const RETRYING_STATUSES: WebhookFailureStatus[] = [
   "pending",
   "processing",
-  "failed",
-] as const satisfies readonly WebhookFailureStatus[];
+];
 
 const HANDLER_LABELS = {
   orders_create: "Orders create",
@@ -69,23 +71,32 @@ function resourceAdminUrl(
   return null;
 }
 
-function parseStatus(raw: string | null): WebhookFailureStatus | undefined {
-  if (raw && JOB_STATUSES.includes(raw as WebhookFailureStatus)) {
-    return raw as WebhookFailureStatus;
+function parseView(raw: string | null): ViewFilter {
+  if (raw && VIEW_FILTERS.includes(raw as ViewFilter)) {
+    return raw as ViewFilter;
   }
-  return undefined;
+  return "failed";
 }
 
 function isJobHandler(value: string): value is WebhookFailureHandler {
   return value in HANDLER_LABELS;
 }
 
+function listStatuses(view: ViewFilter): WebhookFailureStatus[] | undefined {
+  if (view === "failed") return ["failed"];
+  if (view === "retrying") return RETRYING_STATUSES;
+  return undefined;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const status = parseStatus(new URL(request.url).searchParams.get("status"));
+  const view = parseView(new URL(request.url).searchParams.get("status"));
 
   const [jobs, grouped] = await Promise.all([
-    listWebhookFailures(session.shop, { status, limit: 100 }),
+    listWebhookFailures(session.shop, {
+      statuses: listStatuses(view),
+      limit: 100,
+    }),
     prisma.webhookFailure.groupBy({
       by: ["status"],
       where: { shop: session.shop },
@@ -93,15 +104,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
 
-  const counts = {
+  const rawCounts = {
     pending: 0,
     processing: 0,
     failed: 0,
   };
   for (const row of grouped) {
-    counts[row.status] = row._count._all;
+    rawCounts[row.status] = row._count._all;
   }
-  const total = counts.pending + counts.processing + counts.failed;
+  const retrying = rawCounts.pending + rawCounts.processing;
+  const counts = {
+    failed: rawCounts.failed,
+    retrying,
+    total: rawCounts.failed + retrying,
+  };
 
   const serialized: SerializedJob[] = jobs.flatMap((job) => {
     if (!isJobHandler(job.handler)) return [];
@@ -121,7 +137,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ];
   });
 
-  return { shop: session.shop, jobs: serialized, counts, total, status: status ?? "all" };
+  return { shop: session.shop, jobs: serialized, counts, view };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -130,28 +146,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const intent = String(form.get("intent") ?? "");
 
   try {
-    if (intent === "retry") {
+    if (intent === "redrive") {
       const id = String(form.get("id") ?? "");
       const { queued } = await republishWebhookFailures(session.shop, {
         ids: [id],
       });
       if (queued === 0) {
-        return { ok: false, message: "Job not found or already processing." };
+        return { ok: false, message: "Dead letter not found." };
       }
       return {
         ok: true,
-        message: "Queued for Cloud Run. Refresh in a few seconds.",
+        message: "Redriven to Cloud Run. Refresh in a few seconds.",
       };
     }
 
-    if (intent === "retry_all") {
+    if (intent === "redrive_all") {
       const { queued } = await republishWebhookFailures(session.shop);
       if (queued === 0) {
-        return { ok: true, message: "Nothing to retry." };
+        return { ok: true, message: "Nothing to redrive." };
       }
       return {
         ok: true,
-        message: `Queued ${queued} ${queued === 1 ? "job" : "jobs"} for Cloud Run.`,
+        message: `Redriven ${queued} ${queued === 1 ? "dead letter" : "dead letters"} to Cloud Run.`,
       };
     }
   } catch (error) {
@@ -164,16 +180,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 function statusBadge(status: WebhookFailureStatus) {
   if (status === "failed") {
-    return <Badge tone="critical">Failed</Badge>;
+    return <Badge tone="critical">Dead letter</Badge>;
   }
-  if (status === "processing") {
-    return <Badge tone="info">Processing</Badge>;
-  }
-  return <Badge tone="attention">Pending</Badge>;
+  return <Badge tone="attention">Retrying</Badge>;
 }
 
-export default function WebhookFailuresPage() {
-  const { shop, jobs, counts, total, status } = useLoaderData<typeof loader>();
+export default function WebhookDeadLettersPage() {
+  const { shop, jobs, counts, view } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const { revalidate, state: revalidatorState } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -183,10 +196,11 @@ export default function WebhookFailuresPage() {
     message: string;
   } | null>(null);
 
-  const retryingId =
+  const redrivingId =
     fetcher.state !== "idle" ? String(fetcher.formData?.get("id") ?? "") : "";
-  const retryingAll =
-    fetcher.state !== "idle" && fetcher.formData?.get("intent") === "retry_all";
+  const redrivingAll =
+    fetcher.state !== "idle" &&
+    fetcher.formData?.get("intent") === "redrive_all";
   const refreshBlocked =
     revalidatorState !== "idle" || fetcher.state !== "idle";
   const refreshBlockedRef = useRef(refreshBlocked);
@@ -221,27 +235,25 @@ export default function WebhookFailuresPage() {
   }, [fetcher.state, fetcher.data]);
 
   const subtitle = useMemo(() => {
-    return `${total} ${total === 1 ? "job" : "jobs"} · ${counts.failed} failed · ${counts.pending} pending`;
-  }, [total, counts.failed, counts.pending]);
-
-  const retryableCount = counts.pending + counts.failed;
+    return `${counts.failed} dead ${counts.failed === 1 ? "letter" : "letters"} · ${counts.retrying} retrying`;
+  }, [counts.failed, counts.retrying]);
 
   return (
     <Page
-      title="Webhook failures"
+      title="Webhook dead letters"
       subtitle={subtitle}
       fullWidth
       primaryAction={
-        retryableCount > 0
+        counts.failed > 0
           ? {
-            content: "Retry all",
-            loading: retryingAll,
-            onAction: () => {
-              const form = new FormData();
-              form.set("intent", "retry_all");
-              fetcher.submit(form, { method: "post" });
-            },
-          }
+              content: "Redrive all",
+              loading: redrivingAll,
+              onAction: () => {
+                const form = new FormData();
+                form.set("intent", "redrive_all");
+                fetcher.submit(form, { method: "post" });
+              },
+            }
           : undefined
       }
     >
@@ -263,18 +275,20 @@ export default function WebhookFailuresPage() {
                   label="Status"
                   labelHidden
                   options={[
-                    { label: `All (${total})`, value: "all" },
-                    { label: `Pending (${counts.pending})`, value: "pending" },
                     {
-                      label: `Processing (${counts.processing})`,
-                      value: "processing",
+                      label: `Dead letters (${counts.failed})`,
+                      value: "failed",
                     },
-                    { label: `Failed (${counts.failed})`, value: "failed" },
+                    {
+                      label: `Retrying (${counts.retrying})`,
+                      value: "retrying",
+                    },
+                    { label: `All (${counts.total})`, value: "all" },
                   ]}
-                  value={status}
+                  value={view}
                   onChange={(value) => {
                     const params = new URLSearchParams(searchParams);
-                    if (value === "all") params.delete("status");
+                    if (value === "failed") params.delete("status");
                     else params.set("status", value);
                     setSearchParams(params);
                   }}
@@ -290,15 +304,20 @@ export default function WebhookFailuresPage() {
             {jobs.length === 0 ? (
               <Card>
                 <Text as="p" tone="subdued">
-                  {status === "all"
-                    ? "No queued or failed webhook jobs."
-                    : `No ${status} webhook jobs.`}
+                  {view === "retrying"
+                    ? "Nothing auto-retrying."
+                    : view === "all"
+                      ? "No webhook failures."
+                      : "No dead letters."}
                 </Text>
               </Card>
             ) : (
               <Card padding="0">
                 <IndexTable
-                  resourceName={{ singular: "job", plural: "jobs" }}
+                  resourceName={{
+                    singular: "dead letter",
+                    plural: "dead letters",
+                  }}
                   itemCount={jobs.length}
                   headings={[
                     { title: "Handler" },
@@ -317,8 +336,8 @@ export default function WebhookFailuresPage() {
                       job.handler,
                       job.resourceId,
                     );
-                    const canRetry = job.status !== "processing";
-                    const busy = retryingAll || retryingId === job.id;
+                    const canRedrive = job.status === "failed";
+                    const busy = redrivingAll || redrivingId === job.id;
 
                     return (
                       <IndexTable.Row
@@ -362,19 +381,19 @@ export default function WebhookFailuresPage() {
                           </Text>
                         </IndexTable.Cell>
                         <IndexTable.Cell>
-                          {canRetry ? (
+                          {canRedrive ? (
                             <Button
                               size="slim"
-                              loading={busy && retryingId === job.id}
+                              loading={busy && redrivingId === job.id}
                               disabled={busy}
                               onClick={() => {
                                 const form = new FormData();
-                                form.set("intent", "retry");
+                                form.set("intent", "redrive");
                                 form.set("id", job.id);
                                 fetcher.submit(form, { method: "post" });
                               }}
                             >
-                              Retry
+                              Redrive
                             </Button>
                           ) : (
                             <Text as="span" tone="subdued">

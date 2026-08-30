@@ -35,7 +35,7 @@ Resolve the current URL:
 gcloud run services describe shopify-webhooks --project=record-loft --region=us-central1 --format='value(status.url)'
 ```
 
-`concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch).
+`concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch). Push subscriptions `shopify-products-push` and `shopify-orders-push` use `ackDeadlineSeconds=60` (same as the Cloud Run timeout) so a slow handler is not redelivered mid-request.
 
 A successful product description write can fire another `products/update`. Coalesce + “skip if HTML unchanged” limit the echo.
 
@@ -61,7 +61,13 @@ HTTPS `app/uninstalled` and `app/scopes_update` on Netlify still use `authentica
 
 ## Failure handling
 
-Rows in `WebhookFailure`: pending / processing / failed. Success deletes the row. Merchants retry from **App → Webhook status** (`/app/webhooks-admin`). Retry publishes the stored payload back to Pub/Sub; Cloud Run runs the handler. Netlify does not process webhook work.
+`WebhookFailure` is the dead-letter queue. There is no GCP dead-letter topic.
+
+- **Pending** — handler failed, `attempts < 5`. Worker returns HTTP 500 so Pub/Sub redelivers.
+- **Failed** — attempt 5 exhausted, or no offline session. Worker returns 200 so Pub/Sub stops. These rows are the DLQ.
+- **Success** — row is deleted.
+
+**App → Webhook DLQ** (`/app/webhooks-admin`) defaults to failed rows. **Redrive** publishes the stored payload back to Pub/Sub and resets `attempts` to 0. A new Shopify event for the same product/order does the same reset (fresh 5 tries) without opening the DLQ. Retrying (pending) rows are read-only on the page. Netlify does not run handlers.
 
 Netlify (and local retry) need `GCP_PUBSUB_SA_JSON` — the publish-only service account JSON.
 
@@ -90,7 +96,7 @@ gcloud iam service-accounts keys create /tmp/netlify-pubsub-publisher.json \
 
 Paste the JSON file contents into Netlify as `GCP_PUBSUB_SA_JSON`. Do not commit the key.
 
-Pub/Sub retries on HTTP 500 (handler error, no offline session). Poison / unknown topic returns 200 so the message is dropped.
+Pub/Sub retries on HTTP 500 while `attempts < 5`. Exhausted failures and no offline session return 200 (row stays in the DLQ). Poison / unknown topic also returns 200 so the message is dropped.
 
 ## Environment
 
@@ -120,7 +126,7 @@ gcloud pubsub topics publish shopify-products \
   --attribute=X-Shopify-Topic=products/update,X-Shopify-Shop-Domain=YOUR_SHOP.myshopify.com,X-Shopify-Webhook-Id=manual-1,X-Retry-Source=admin
 ```
 
-`X-Retry-Source=admin` is a log tag (same as `/app/webhooks-admin` retry). It is not required for the worker to accept the message. Topic publish IAM is the gate.
+`X-Retry-Source=admin` is a log tag (same as Webhook DLQ Redrive). It is not required for the worker to accept the message. Topic publish IAM is the gate.
 
 Use a real product id. A fake id (`1`) returns `product_not_found` and Pub/Sub will retry until you seek the subscription.
 

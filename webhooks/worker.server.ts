@@ -92,10 +92,18 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   console.error(
     `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
       `messageId=${messageId} source=${source} outcome=failure code=${result.code} ` +
-      `message=${result.message} latencyMs=${latencyMs}`,
+      `message=${result.message} retry=${result.retry} latencyMs=${latencyMs}`,
   );
-  send(res, 500, {
-    status: "failure",
+  if (result.retry) {
+    send(res, 500, {
+      status: "failure",
+      code: result.code,
+      message: result.message,
+    });
+    return;
+  }
+  send(res, 200, {
+    status: "dlq",
     code: result.code,
     message: result.message,
   });
