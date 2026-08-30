@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      HUSKY: "0"
+      # prisma generate reads DIRECT_URL from prisma.config.ts; tests mock Prisma.
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: yarn prisma generate
+
+      - name: Test
+        run: yarn test
+
+      - name: Typecheck
+        run: yarn typecheck

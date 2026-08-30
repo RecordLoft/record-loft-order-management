@@ -239,13 +239,6 @@ export function selectedMetafieldsFromAll(
   return fields;
 }
 
-/** @deprecated Use selectedMetafieldsFromAll */
-export function vinylMetafieldsFromNodes(
-  nodes: ProductMetafield[],
-): VinylMetafields {
-  return selectedMetafieldsFromAll(nodes);
-}
-
 export function stripHiddenRecordBlock(descriptionHtml: string): string {
   const html = descriptionHtml ?? "";
   const index = html.indexOf(HIDDEN_MARKER);

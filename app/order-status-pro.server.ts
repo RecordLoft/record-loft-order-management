@@ -155,31 +155,6 @@ export function orderStatusFromRow(order: {
   return "Unknown";
 }
 
-const statusWatchers = new Map<string, Set<(statusName: string) => void>>();
-
-export function subscribeOrderStatusWatch(
-  orderId: bigint,
-  onUpdate: (statusName: string) => void,
-): () => void {
-  const key = orderId.toString();
-  let listeners = statusWatchers.get(key);
-  if (!listeners) {
-    listeners = new Set();
-    statusWatchers.set(key, listeners);
-  }
-  listeners.add(onUpdate);
-  return () => {
-    listeners!.delete(onUpdate);
-    if (listeners!.size === 0) statusWatchers.delete(key);
-  };
-}
-
-function emitOrderStatusCacheUpdated(orderId: bigint, statusName: string) {
-  statusWatchers.get(orderId.toString())?.forEach((listener) => {
-    listener(statusName);
-  });
-}
-
 export function parseOrderIdsParam(value: string | null): bigint[] {
   if (!value?.trim()) return [];
   return value
@@ -237,9 +212,6 @@ export async function applyOrderStatusCache(
       ospStatusSyncedAt: new Date(),
     },
   });
-  if (result.count > 0) {
-    emitOrderStatusCacheUpdated(orderId, statusName);
-  }
   return result.count > 0;
 }
 

@@ -1,6 +1,6 @@
 # Deploy the webhook worker
 
-GitHub Actions builds `Dockerfile.worker` and deploys Cloud Run `shopify-webhooks` on push to `main` (path-filtered) or **Actions → Deploy webhooks → Run workflow**.
+GitHub Actions builds `Dockerfile.worker` (the Cloud Run image; there is no app `Dockerfile`) and deploys Cloud Run `shopify-webhooks` on push to `main` (path-filtered) or **Actions → Deploy webhooks → Run workflow**. Test and typecheck run separately in the `CI` workflow.
 
 If the deploy includes a Prisma schema change, run `yarn prisma migrate deploy` against Aiven **before** the new revision starts. The worker image does not run migrations.
 

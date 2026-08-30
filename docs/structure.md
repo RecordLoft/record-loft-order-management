@@ -10,7 +10,7 @@ app/                    React Router app (Netlify)
   record-planet.server.ts
   order-status-pro.server.ts
 webhooks/               Cloud Run worker, queue, handlers
-.github/workflows/      Deploy webhooks to Cloud Run
+.github/workflows/      CI (test + typecheck) and Cloud Run worker deploy
 netlify/functions/      warm-app (hits /api/health every 5 min)
 prisma/                 Schema + migrations
 extensions/             Admin action extensions (Shopify-hosted)
@@ -54,7 +54,11 @@ Record Planet queries filter by `session.shop`. `shopifyApp()` uses `AppDistribu
 - `extensions/pick-list-print` — admin action to print a pick list.
 - `extensions/ready-for-pickup` — admin action for ready-for-pickup.
 
-They ship with `shopify app deploy`, not Netlify.
+They ship with `shopify app deploy`, not Netlify. Each extension has its own `tsconfig.json`; the repo root typecheck excludes `extensions/`.
+
+## CI
+
+`.github/workflows/ci.yml` runs `yarn test` and `yarn typecheck` on pull requests and pushes to `main`. The pre-commit hook still runs `yarn test` locally. Worker deploys stay in `deploy-webhooks.yml`.
 
 ## Database
 

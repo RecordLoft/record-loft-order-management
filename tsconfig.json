@@ -3,9 +3,9 @@
     "env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    ".react-router/types/**/*",
-    "extensions/pick-list-print/src/ActionExtension.tsx"
+    ".react-router/types/**/*"
   ],
+  "exclude": ["extensions", "node_modules", "build", ".netlify"],
   "compilerOptions": {
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "strict": true,
