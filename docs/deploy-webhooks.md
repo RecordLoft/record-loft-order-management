@@ -97,4 +97,4 @@ Or `gcloud builds submit . --project=record-loft --config=cloudbuild.worker.yaml
 
 `GET /` on the service URL should return `{ ok: true }`. `GET /health` should return `{ ok: true, db: true }` (needs an authenticated caller; use Cloud Run logs or an identity token).
 
-Edit a product in Shopify admin. Cloud Run logs should show `[pubsub-worker] topic=products/update`.
+Edit a product in Shopify admin. In Log Explorer, filter `resource.labels.service_name="shopify-webhooks"` and `jsonPayload.topic="products/update"`. The summary line is `jsonPayload.message` (for example `webhook completed`).

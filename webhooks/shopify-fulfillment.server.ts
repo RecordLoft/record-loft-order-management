@@ -1,3 +1,4 @@
+import { log } from "./log.server";
 import type { GraphqlRequest } from "./product-description.server";
 
 export type FulfillmentOrderForProgress = {
@@ -126,11 +127,8 @@ export type MarkInProgressResult =
 export async function markFulfillmentOrdersInProgress(
   graphql: GraphqlRequest,
   fulfillmentOrders: FulfillmentOrderForProgress[],
-  options?: { reasonNotes?: string; logPrefix?: string },
+  options?: { reasonNotes?: string },
 ): Promise<MarkInProgressResult> {
-  const log = (msg: string) =>
-    console.log(options?.logPrefix ? `[${options.logPrefix}] ${msg}` : msg);
-
   if (fulfillmentOrders.length === 0) {
     return {
       ok: false,
@@ -148,9 +146,11 @@ export async function markFulfillmentOrdersInProgress(
 
   if (eligible.length === 0) {
     if (leftoverOpen.length > 0) {
-      log(
-        `Fulfillment orders not ready for REPORT_PROGRESS (statuses: ${fulfillmentOrders.map((fo) => fo.status).join(", ")})`,
-      );
+      log.info({
+        component: "shopify-fulfillment",
+        message: "fulfillment orders not ready for REPORT_PROGRESS",
+        statuses: fulfillmentOrders.map((fo) => fo.status),
+      });
       return {
         ok: false,
         retryable: true,
@@ -159,9 +159,11 @@ export async function markFulfillmentOrdersInProgress(
       };
     }
     if (alreadyInProgress.length > 0) {
-      log(
-        `Fulfillment already in progress (${alreadyInProgress.length} order(s))`,
-      );
+      log.info({
+        component: "shopify-fulfillment",
+        message: "fulfillment already in progress",
+        alreadyInProgress: alreadyInProgress.length,
+      });
     }
     return { ok: true, marked: 0 };
   }
@@ -203,9 +205,12 @@ export async function markFulfillmentOrdersInProgress(
     }
 
     marked += 1;
-    log(
-      `Marked fulfillment order ${fo.id} in progress (status: ${payload?.fulfillmentOrder?.status ?? "unknown"})`,
-    );
+    log.info({
+      component: "shopify-fulfillment",
+      message: "marked fulfillment order in progress",
+      fulfillmentOrderId: fo.id,
+      status: payload?.fulfillmentOrder?.status ?? "unknown",
+    });
   }
 
   if (graphqlErrors.length > 0) {

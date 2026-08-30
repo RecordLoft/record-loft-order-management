@@ -7,6 +7,7 @@ Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (fai
 | File | Role |
 |---|---|
 | `worker.server.ts` | Cloud Run HTTP server (Pub/Sub push). `GET /` liveness, `GET /health` DB ping. |
+| `log.server.ts` | Structured JSON lines for Log Explorer (`severity`, `message`, trace) |
 | `parse-pubsub.ts` | Decode the push envelope + Shopify attributes |
 | `queue.server.ts` | Coalesce, claim (`processing`), run, persist / delete `WebhookFailure` |
 | `product-description.handler.server.ts` | Rebuild product `descriptionHtml` |

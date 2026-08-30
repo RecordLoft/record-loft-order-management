@@ -13,6 +13,7 @@ import {
   handleRefundsCreate,
 } from "./orders-lifecycle.handler.server";
 import { handleProductDescriptionSync } from "./product-description.handler.server";
+import { log } from "./log.server";
 
 export const WEBHOOK_ERROR_CODES = {
   NO_ADMIN_SESSION: "no_admin_session",
@@ -77,10 +78,13 @@ async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
     const { admin } = await unauthenticated.admin(shop);
     return admin.graphql.bind(admin);
   } catch (error) {
-    console.error(
-      `[webhook-queue] No admin session for ${shop}:`,
-      await formatError(error),
-    );
+    log.error({
+      component: "webhook-queue",
+      message: "no admin session",
+      shop,
+      error,
+      detail: await formatError(error),
+    });
     return null;
   }
 }
@@ -358,10 +362,15 @@ export async function tryEnqueueWebhookWork(input: WebhookWorkInput) {
     return { row: await enqueueWebhookWork(input), error: null as string | null };
   } catch (error) {
     const message = await formatError(error);
-    console.error(
-      `[webhook-queue] enqueue failed shop=${input.shop} ` +
-        `handler=${input.handler} resourceId=${input.resourceId} ${message}`,
-    );
+    log.error({
+      component: "webhook-queue",
+      message: "enqueue failed",
+      shop: input.shop,
+      handler: input.handler,
+      resourceId: input.resourceId,
+      error,
+      detail: message,
+    });
     return { row: null, error: message };
   }
 }

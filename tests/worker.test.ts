@@ -54,13 +54,13 @@ function envelope(payload: unknown, attributes: Record<string, string>) {
 
 function requestFrom(
   body: unknown | string,
-  init?: { method?: string; url?: string },
+  init?: { method?: string; url?: string; headers?: Record<string, string> },
 ) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
   return Object.assign(Readable.from([raw]), {
     method: init?.method ?? "POST",
     url: init?.url ?? "/",
-    headers: { host: "localhost" },
+    headers: { host: "localhost", ...init?.headers },
   });
 }
 
@@ -219,6 +219,39 @@ describe("handlePush", () => {
     await handlePush(requestFrom(productPush) as never, retry as never);
     expect(retry.statusCode).toBe(500);
     expect(retry.body).toMatchObject({ status: "failure", code: "graphql_errors" });
+  });
+
+  it("writes structured JSON with outcome fields and request trace", async () => {
+    const lines: unknown[] = [];
+    const info = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+      lines.push(JSON.parse(String(line)));
+    });
+    const res = mockRes();
+    await handlePush(
+      requestFrom(productPush, {
+        headers: { "x-cloud-trace-context": "abc123def/1;o=1" },
+      }) as never,
+      res as never,
+    );
+    info.mockRestore();
+    expect(res.statusCode).toBe(200);
+    expect(lines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "INFO",
+          message: "webhook completed",
+          component: "pubsub-worker",
+          topic: "products/update",
+          shop: "record-loft.myshopify.com",
+          resourceId: "7",
+          messageId: "m-1",
+          source: "shopify-publish",
+          outcome: "completed",
+          "logging.googleapis.com/trace":
+            "projects/record-loft/traces/abc123def",
+        }),
+      ]),
+    );
   });
 
   it("tags admin retries without treating the header as a security bypass", async () => {

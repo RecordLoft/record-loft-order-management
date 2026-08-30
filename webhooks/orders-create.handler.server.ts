@@ -1,5 +1,6 @@
 import { prisma } from "../app/db.server";
 import { applyOrderImportPending } from "../app/order-import-pending.server";
+import { log } from "./log.server";
 import type { GraphqlRequest } from "./product-description.server";
 import {
   listFulfillmentOrdersForOrder,
@@ -77,7 +78,6 @@ export async function handleOrdersCreate(
   payload: OrderWebhookPayload,
   graphql: GraphqlRequest,
 ): Promise<WebhookHandlerResult> {
-  const threadId = crypto.randomUUID();
   const {
     id,
     order_number,
@@ -109,10 +109,14 @@ export async function handleOrdersCreate(
   let fulfillmentOrders: FulfillmentOrderForProgress[] = [];
 
   if (productIds.length > 0) {
-    console.log(
-      `[${threadId}] Fetching product information for IDs:`,
+    log.info({
+      component: "orders-create",
+      message: "fetching product information",
+      shop,
+      resourceId: id,
       productIds,
-    );
+      step: "fetch_products",
+    });
     const response = await graphql(
       `
         query getOrderEnrichment($productIds: [ID!]!) {
@@ -199,11 +203,19 @@ export async function handleOrdersCreate(
     deliveryMethod = "recordPlanet";
   }
 
-  console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`);
-  console.log(`[${threadId}] Source name: ${source_name}`);
-  console.log(
-    `[${threadId}] Shipping lines: ${JSON.stringify(shipping_lines)}`,
-  );
+  log.info({
+    component: "orders-create",
+    message: "importing order",
+    shop,
+    resourceId: id,
+    sourceName: source_name,
+    shippingLineCount: Array.isArray(shipping_lines)
+      ? shipping_lines.length
+      : shipping_lines == null
+        ? 0
+        : 1,
+    step: "import",
+  });
 
   const customerPhone = resolveCustomerPhone(payload);
   const orderId = BigInt(id);
@@ -274,7 +286,13 @@ export async function handleOrdersCreate(
     }
   });
 
-  console.log(`[${threadId}] Imported order ${BigInt(id)}`);
+  log.info({
+    component: "orders-create",
+    message: "imported order",
+    shop,
+    resourceId: id,
+    step: "imported",
+  });
 
   await applyOrderImportPending(orderId);
 
@@ -283,7 +301,6 @@ export async function handleOrdersCreate(
       graphql,
       fulfillmentOrders,
       {
-        logPrefix: threadId,
         reasonNotes: "Record Planet Shipping order received",
       },
     );

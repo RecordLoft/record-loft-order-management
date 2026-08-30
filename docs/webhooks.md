@@ -148,4 +148,25 @@ Shopify CLI `webhook trigger` to `pubsub://record-loft:shopify-products` tests p
 shopify app deploy
 ```
 
-Wait a few minutes, edit a product in admin, then Cloud Run logs should show `[pubsub-worker] topic=products/update`.
+Wait a few minutes, edit a product in admin, then in Log Explorer filter `jsonPayload.topic="products/update"`.
+
+## Log Explorer
+
+Cloud Run writes one JSON object per line to stdout/stderr. The logging agent maps reserved fields (`severity`, `message`, `logging.googleapis.com/trace`) onto the LogEntry; everything else is `jsonPayload`. There is no Logging SDK — see [Cloud Run structured logs](https://cloud.google.com/run/docs/logging).
+
+Typical fields: `component` (`pubsub-worker`, `webhook-queue`, `orders-create`, `shopify-fulfillment`), `topic`, `shop`, `resourceId`, `messageId`, `source` (`shopify-publish` or `admin-retry`), `outcome`, `latencyMs`, `code`, `reason`. Request logs nest together when the worker copies `X-Cloud-Trace-Context` into `logging.googleapis.com/trace` as `projects/record-loft/traces/{traceId}`.
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="shopify-webhooks"
+jsonPayload.topic="products/update"
+
+severity>=WARNING
+
+jsonPayload.outcome="busy" OR jsonPayload.outcome="enqueue_failed"
+
+jsonPayload.source="admin-retry"
+
+jsonPayload.shop="record-loft.myshopify.com"
+jsonPayload.resourceId="7"
+```

@@ -15,6 +15,11 @@ import {
   type PubSubPushEnvelope,
 } from "./parse-pubsub";
 import {
+  log,
+  runWithLogContext,
+  traceHeaderFromRequest,
+} from "./log.server";
+import {
   claimWebhookWork,
   processWebhookWork,
   recordAckDrop,
@@ -86,7 +91,12 @@ async function persistAckDrop(
     await recordAckDrop({ ...context, reason });
     return true;
   } catch (error) {
-    console.error(`[pubsub-worker] ack-drop persist failed reason=${reason}`, error);
+    log.error({
+      component: "pubsub-worker",
+      message: "ack-drop persist failed",
+      reason,
+      error,
+    });
     return false;
   }
 }
@@ -110,25 +120,37 @@ export async function releaseClaimedWork(): Promise<void> {
   try {
     await releaseWebhookWork(work);
   } catch (error) {
-    console.error("[pubsub-worker] release claimed work failed", error);
+    log.error({
+      component: "pubsub-worker",
+      message: "release claimed work failed",
+      error,
+    });
   }
 }
 
-export async function handlePush(req: IncomingMessage, res: ServerResponse) {
+async function handlePushInner(req: IncomingMessage, res: ServerResponse) {
   let envelope: PubSubPushEnvelope;
   try {
     envelope = (await readJson(req)) as PubSubPushEnvelope;
   } catch (error) {
     const reason =
       error instanceof BodyTooLargeError ? "body too large" : "invalid json";
-    console.warn(`[pubsub-worker] ack-drop reason=${reason}`);
+    log.warn({
+      component: "pubsub-worker",
+      message: "ack-drop",
+      reason,
+    });
     sendAckDrop(res, reason, await persistAckDrop({}, reason));
     return;
   }
 
   const parsed = parsePubSubPush(envelope ?? {});
   if (!parsed.ok) {
-    console.warn(`[pubsub-worker] ack-drop reason=${parsed.reason}`);
+    log.warn({
+      component: "pubsub-worker",
+      message: "ack-drop",
+      reason: parsed.reason,
+    });
     sendAckDrop(
       res,
       parsed.reason,
@@ -143,9 +165,14 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
     : "shopify-publish";
   if (!allowedTopicsFromEnv().has(topic)) {
     const reason = `topic ${topic} not allowed`;
-    console.log(
-      `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId} source=${source}`,
-    );
+    log.info({
+      component: "pubsub-worker",
+      message: "ignored topic",
+      topic,
+      shop,
+      messageId,
+      source,
+    });
     sendAckDrop(res, reason, await persistAckDrop(envelope, reason));
     return;
   }
@@ -153,21 +180,35 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
   const started = Date.now();
   const { error: enqueueError } = await tryEnqueueWebhookWork(work);
   if (enqueueError) {
-    console.error(
-      `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-        `messageId=${messageId} source=${source} outcome=enqueue_failed ` +
-        `message=${enqueueError} latencyMs=${Date.now() - started}`,
-    );
+    log.error({
+      component: "pubsub-worker",
+      message: "enqueue failed",
+      topic,
+      shop,
+      resourceId: work.resourceId,
+      messageId,
+      source,
+      outcome: "enqueue_failed",
+      error: enqueueError,
+      latencyMs: Date.now() - started,
+    });
     send(res, 500, { status: "enqueue_failed", message: enqueueError });
     return;
   }
 
   const claimed = await claimWebhookWork(work);
   if (!claimed) {
-    console.log(
-      `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-        `messageId=${messageId} source=${source} outcome=busy latencyMs=${Date.now() - started}`,
-    );
+    log.info({
+      component: "pubsub-worker",
+      message: "busy",
+      topic,
+      shop,
+      resourceId: work.resourceId,
+      messageId,
+      source,
+      outcome: "busy",
+      latencyMs: Date.now() - started,
+    });
     send(res, 500, { status: "busy" });
     return;
   }
@@ -184,20 +225,36 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
   const latencyMs = Date.now() - started;
 
   if (result.status === "success") {
-    console.log(
-      `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-        `messageId=${messageId} source=${source} outcome=${result.outcome} ` +
-        `detail=${result.detail} latencyMs=${latencyMs}`,
-    );
+    log.info({
+      component: "pubsub-worker",
+      message: "webhook completed",
+      topic,
+      shop,
+      resourceId: work.resourceId,
+      messageId,
+      source,
+      outcome: result.outcome,
+      detail: result.detail,
+      latencyMs,
+    });
     send(res, 200, { status: result.outcome, latencyMs });
     return;
   }
 
-  console.error(
-    `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-      `messageId=${messageId} source=${source} outcome=failure code=${result.code} ` +
-      `message=${result.message} retry=${result.retry} latencyMs=${latencyMs}`,
-  );
+  log.error({
+    component: "pubsub-worker",
+    message: "webhook failed",
+    topic,
+    shop,
+    resourceId: work.resourceId,
+    messageId,
+    source,
+    outcome: "failure",
+    code: result.code,
+    detail: result.message,
+    retry: result.retry,
+    latencyMs,
+  });
   if (result.retry) {
     send(res, 500, {
       status: "failure",
@@ -211,6 +268,13 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
     code: result.code,
     message: result.message,
   });
+}
+
+export async function handlePush(req: IncomingMessage, res: ServerResponse) {
+  return runWithLogContext(
+    { traceHeader: traceHeaderFromRequest(req) },
+    () => handlePushInner(req, res),
+  );
 }
 
 export function handleWorkerRequest(
@@ -231,7 +295,16 @@ export function handleWorkerRequest(
     prisma.$queryRaw`SELECT 1`
       .then(() => send(res, 200, { ok: true, db: true }))
       .catch((error: unknown) => {
-        console.error("[pubsub-worker] health db failed", error);
+        runWithLogContext(
+          { traceHeader: traceHeaderFromRequest(req) },
+          () => {
+            log.error({
+              component: "pubsub-worker",
+              message: "health db failed",
+              error,
+            });
+          },
+        );
         send(res, 503, { ok: false, db: false });
       });
     return;
@@ -248,7 +321,16 @@ export function handleWorkerRequest(
     workerState.inFlight += 1;
     handlePush(req, res)
       .catch((error: unknown) => {
-        console.error("[pubsub-worker] unhandled", error);
+        runWithLogContext(
+          { traceHeader: traceHeaderFromRequest(req) },
+          () => {
+            log.error({
+              component: "pubsub-worker",
+              message: "unhandled",
+              error,
+            });
+          },
+        );
         send(res, 500, { status: "error" });
       })
       .finally(() => {
@@ -273,13 +355,19 @@ export function startWorker() {
   const server = createServer(handleWorkerRequest);
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(
-      `[pubsub-worker] listening on ${PORT} topics=${[...allowedTopicsFromEnv()].join(",")}`,
-    );
+    log.info({
+      component: "pubsub-worker",
+      message: "listening",
+      port: PORT,
+      topics: [...allowedTopicsFromEnv()],
+    });
   });
 
   process.on("SIGTERM", () => {
-    console.log("[pubsub-worker] SIGTERM, draining");
+    log.info({
+      component: "pubsub-worker",
+      message: "SIGTERM, draining",
+    });
     workerState.shuttingDown = true;
     void releaseClaimedWork();
     server.close(() => {
