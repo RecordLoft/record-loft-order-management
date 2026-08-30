@@ -4,7 +4,7 @@ Embedded Shopify app for Record Loft. Merchants use it inside admin for Record P
 
 | Surface | Host |
 |---|---|
-| Embedded admin, OAuth, StatusPro webhook | **Netlify** (`application_url`) |
+| Embedded admin, OAuth, StatusPro webhook, HTTPS lifecycle (`app/uninstalled`, `app/scopes_update`) | **Netlify** (`application_url`) |
 | `products/create`, `products/update`, `orders/create` | **Pub/Sub → Cloud Run** |
 | Sessions, queued/failed jobs | **Aiven Postgres** |
 | Admin action extensions | **Shopify** (not this host) |
@@ -24,7 +24,7 @@ yarn prisma generate
 shopify app dev
 ```
 
-Needs `.env` with `DATABASE_URL` (Aiven) and the Shopify app client id/secret (`SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`). See [docs/webhooks.md](docs/webhooks.md#environment) for Cloud Run vars.
+Needs `.env` with `DATABASE_URL` (Aiven) and the Shopify app client id/secret (`SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`). Retry from local `shopify app dev` or Netlify admin also needs `GCP_PUBSUB_SA_JSON` — see [docs/webhooks.md](docs/webhooks.md#environment).
 
 ## Production deploys
 

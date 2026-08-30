@@ -1,4 +1,4 @@
-import { GoogleAuth } from "google-auth-library";
+import { createSign } from "node:crypto";
 import {
   WebhookFailureHandler,
   WebhookFailureStatus,
@@ -7,10 +7,17 @@ import { prisma } from "./db.server";
 import { normalizeTopic } from "../webhooks/parse-pubsub";
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID ?? "record-loft";
+const TOKEN_AUD = "https://oauth2.googleapis.com/token";
+const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
 
 const PUBSUB_TOPIC_BY_HANDLER: Record<WebhookFailureHandler, string> = {
   [WebhookFailureHandler.product_description_sync]: "shopify-products",
   [WebhookFailureHandler.orders_create]: "shopify-orders",
+};
+
+type ServiceAccountJson = {
+  client_email: string;
+  private_key: string;
 };
 
 type FailureToPublish = {
@@ -27,24 +34,60 @@ export type RepublishResult = {
   ids: string[];
 };
 
-function credentialsFromEnv(): Record<string, unknown> | undefined {
+function base64Url(input: string | Buffer): string {
+  const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
+  return buf.toString("base64url");
+}
+
+function serviceAccountFromEnv(): ServiceAccountJson {
   const raw = process.env.GCP_PUBSUB_SA_JSON?.trim();
-  if (!raw) return undefined;
-  return JSON.parse(raw) as Record<string, unknown>;
+  if (!raw) {
+    throw new Error(
+      "GCP_PUBSUB_SA_JSON is not configured. Add the publish-only service account JSON on Netlify.",
+    );
+  }
+  const parsed = JSON.parse(raw) as Partial<ServiceAccountJson>;
+  if (!parsed.client_email || !parsed.private_key) {
+    throw new Error("GCP_PUBSUB_SA_JSON must include client_email and private_key");
+  }
+  return { client_email: parsed.client_email, private_key: parsed.private_key };
 }
 
 async function pubsubAccessToken(): Promise<string> {
-  const credentials = credentialsFromEnv();
-  const auth = new GoogleAuth({
-    ...(credentials ? { credentials } : {}),
-    scopes: ["https://www.googleapis.com/auth/pubsub"],
+  const { client_email, private_key } = serviceAccountFromEnv();
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claim = base64Url(
+    JSON.stringify({
+      iss: client_email,
+      sub: client_email,
+      aud: TOKEN_AUD,
+      iat: now,
+      exp: now + 3600,
+      scope: PUBSUB_SCOPE,
+    }),
+  );
+  const signer = createSign("RSA-SHA256");
+  signer.update(`${header}.${claim}`);
+  const jwt = `${header}.${claim}.${base64Url(signer.sign(private_key))}`;
+
+  const response = await fetch(TOKEN_AUD, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
   });
-  const client = await auth.getClient();
-  const token = await client.getAccessToken();
-  if (!token.token) {
-    throw new Error("Failed to get a Pub/Sub access token");
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Failed to get a Pub/Sub token (${response.status}): ${detail.slice(0, 300)}`);
   }
-  return token.token;
+  const json = (await response.json()) as { access_token?: string };
+  if (!json.access_token) {
+    throw new Error("Pub/Sub token response missing access_token");
+  }
+  return json.access_token;
 }
 
 async function publishMessages(
@@ -58,9 +101,7 @@ async function publishMessages(
       attributes: {
         "X-Shopify-Topic": normalizeTopic(row.topic),
         "X-Shopify-Shop-Domain": row.shop,
-        ...(row.webhookId
-          ? { "X-Shopify-Webhook-Id": row.webhookId }
-          : {}),
+        ...(row.webhookId ? { "X-Shopify-Webhook-Id": row.webhookId } : {}),
       },
     })),
   };

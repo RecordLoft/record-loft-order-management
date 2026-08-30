@@ -25,9 +25,15 @@ Shop event
               → 200 ack or 500 retry
 ```
 
-Both topics push to the same service:
+Both topics push to the same service. Example URL (may change on recreate):
 
 `https://shopify-webhooks-hoyw7t3asq-uc.a.run.app/`
+
+Resolve the current URL:
+
+```bash
+gcloud run services describe shopify-webhooks --project=record-loft --region=us-central1 --format='value(status.url)'
+```
 
 `concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch).
 
@@ -37,7 +43,7 @@ A successful product description write can fire another `products/update`. Coale
 
 Rows in `WebhookFailure`: pending / processing / failed. Success deletes the row. Merchants retry from **App → Webhook status** (`/app/webhooks-admin`). Retry publishes the stored payload back to Pub/Sub; Cloud Run runs the handler. Netlify does not process webhook work.
 
-Netlify needs `GCP_PUBSUB_SA_JSON` (publish-only service account) to retry. Local `shopify app dev` can use `gcloud` application-default credentials instead.
+Netlify (and local retry) need `GCP_PUBSUB_SA_JSON` — the publish-only service account JSON.
 
 ```bash
 PROJECT_ID=record-loft

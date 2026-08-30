@@ -1,6 +1,6 @@
 # Webhooks
 
-Pub/Sub worker and handlers. The embedded admin still serves `/app/webhooks-admin` from `app/routes/app.webhooks-admin.tsx` (retry republishes to Pub/Sub; it does not run handlers).
+Pub/Sub worker and handlers. The embedded admin still serves `/app/webhooks-admin` from `app/routes/app.webhooks-admin.tsx`. `app/webhook-retry-publish.server.ts` republishes stored payloads to Pub/Sub; Netlify does not run handlers.
 
 `app/` stays the React Router app. This folder is what Cloud Run runs.
 

@@ -43,7 +43,7 @@ See [webhooks/README.md](../webhooks/README.md).
 - **Product** — rebuild `descriptionHtml` from metafields.
 - **Order create** — persist the order, mark fulfillment in progress when applicable.
 
-`queue.server.ts` coalesces work on `(shop, handler, resourceId)`, runs the handler via `unauthenticated.admin(shop)`, deletes the row on success, keeps it on failure for `/app/webhooks-admin`.
+`queue.server.ts` coalesces work on `(shop, handler, resourceId)`, runs the handler via `unauthenticated.admin(shop)`, deletes the row on success, keeps it on failure for `/app/webhooks-admin`. `app/webhook-retry-publish.server.ts` republishes stored payloads to Pub/Sub for admin retry from `/app/webhooks-admin`. Netlify does not run handlers.
 
 Cloud Run starts `webhooks/worker.server.ts` (plain `node:http`). It does not start Vite or React Router. The image still copies `app/` so the worker can load Prisma and the offline session.
 
