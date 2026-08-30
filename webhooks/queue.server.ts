@@ -228,7 +228,7 @@ export async function enqueueWebhookWork(input: WebhookWorkInput) {
   const fields = webhookWorkWriteData(input);
 
   try {
-    return await prisma.webhookFailure.upsert({
+    await prisma.webhookFailure.upsert({
       where: { shop_handler_resourceId: unique },
       create: {
         shop: input.shop,
