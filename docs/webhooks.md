@@ -1,0 +1,80 @@
+# Webhooks
+
+Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinations requires `shopify app deploy`.
+
+## What goes where
+
+| Topic | Destination | Why |
+|---|---|---|
+| `products/create`, `products/update` | `pubsub://record-loft:shopify-products` | High volume. Shopify succeeds when GCP accepts the publish, not when GraphQL finishes. |
+| `orders/create` | `pubsub://record-loft:shopify-orders` | Same worker URL, separate topic so you can split later. |
+| `app/uninstalled`, `app/scopes_update` | HTTPS on Netlify | Rare, part of the app install. |
+| StatusPro | `/api/webhooks/order-status-pro/:token` | Third party, not Shopify HMAC. |
+
+`SHOPIFY_APP_URL` is still `https://record-loft-order-management.netlify.app`. That is the **embedded app**, not the webhook URL. Cloud Run needs it only because it reuses `shopifyApp()` to load the offline session.
+
+## Flow (products / orders)
+
+```
+Shop event
+  → Shopify publishes to Pub/Sub          (delivery success)
+      → push subscription (OIDC)
+          → Cloud Run shopify-webhooks
+              → enqueue (coalesce same product/order)
+              → handleProductDescriptionSync / handleOrdersCreate
+              → 200 ack or 500 retry
+```
+
+Both topics push to the same service:
+
+`https://shopify-webhooks-hoyw7t3asq-uc.a.run.app/`
+
+`concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch).
+
+A successful product description write can fire another `products/update`. Coalesce + “skip if HTML unchanged” limit the echo.
+
+## Failure handling
+
+Rows in `WebhookFailure`: pending / processing / failed. Success deletes the row. Merchants retry from **App → Webhook status** (`/app/webhooks`).
+
+Pub/Sub retries on HTTP 500 (handler error, no offline session). Poison / unknown topic returns 200 so the message is dropped.
+
+## Environment
+
+**Netlify** (app): `DATABASE_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, StatusPro + `CRON_SECRET` as used today.
+
+**Cloud Run** (worker):
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Aiven (same as Netlify) |
+| `SHOPIFY_API_KEY` | Partner **Client ID** |
+| `SHOPIFY_API_SECRET` | Partner **Client secret** |
+| `SCOPES` | Same list as `shopify.app.toml` |
+| `SHOPIFY_APP_URL` | Netlify app URL (library init, not ingress) |
+| `ALLOWED_TOPICS` | Optional. Default is products + orders. |
+
+Not needed on Cloud Run: `DIRECT_URL`, StatusPro, `CRON_SECRET`.
+
+`SHOPIFY_API_KEY` / `SECRET` are the app client id and secret, not the shop’s Admin access token. The token is the offline session in Postgres.
+
+## Test without Shopify
+
+```bash
+gcloud pubsub topics publish shopify-products \
+  --project=record-loft \
+  --message='{"id":YOUR_PRODUCT_NUMERIC_ID}' \
+  --attribute=X-Shopify-Topic=products/update,X-Shopify-Shop-Domain=YOUR_SHOP.myshopify.com,X-Shopify-Webhook-Id=manual-1
+```
+
+Use a real product id. A fake id (`1`) returns `product_not_found` and Pub/Sub will retry until you seek the subscription.
+
+Shopify CLI `webhook trigger` to `pubsub://record-loft:shopify-products` tests publish. The CLI shop has no offline session, so GraphQL will fail; that does not mean the subscription is wrong.
+
+## After changing toml
+
+```bash
+shopify app deploy
+```
+
+Wait a few minutes, edit a product in admin, then Cloud Run logs should show `[pubsub-worker] topic=products/update`.

@@ -2,9 +2,9 @@ import type { Config } from "@netlify/functions";
 import { fetchAppPath } from "../lib/site-url";
 
 /**
- * Keeps the React Router System function warm for Shopify webhooks.
+ * Keeps the React Router System function warm for the embedded admin.
+ * Shopify product/order webhooks go to Pub/Sub → Cloud Run, not here.
  * Complements hourly db-ping (DB canary), which does not warm System.
- * Webhook work is waitUntil on delivery, with process-webhook-jobs as backup.
  */
 export default async () => {
   const started = Date.now();

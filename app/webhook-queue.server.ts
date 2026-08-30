@@ -9,7 +9,7 @@ import { handleOrdersCreate } from "./webhooks/orders-create.handler.server";
 import { handleProductDescriptionSync } from "./webhooks/product-description.handler.server";
 
 const STALE_PROCESSING_MS = 10 * 60 * 1000;
-/** Max failures per cron tick (avoids function timeout / API rate limits). */
+/** Max jobs per admin / CLI retry sweep. */
 export const CRON_BATCH_LIMIT = 20;
 
 export const WEBHOOK_HANDLERS = {
@@ -206,51 +206,101 @@ export async function recordWebhookFailureNoSession(input: WebhookWorkInput) {
   );
 }
 
+function isPrismaErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: unknown }).code === code
+  );
+}
+
+function webhookWorkWriteData(input: WebhookWorkInput) {
+  return {
+    topic: input.topic,
+    resourceGid: input.resourceGid ?? null,
+    webhookId: input.webhookId ?? null,
+    payload: input.payload as object,
+    status: WebhookFailureStatus.pending,
+    outcome: null as string | null,
+    errorCode: null as string | null,
+    errorMessage: null as string | null,
+    attempts: 0,
+    lastAttemptAt: null as Date | null,
+    completedAt: null as Date | null,
+  };
+}
+
 /**
- * Ack-first: store the payload as pending and return. Cron / admin retries
- * run the handler; successes are deleted, failures stay in this table.
+ * Persist work for Cloud Run coalesce / admin retry. Successes are deleted;
+ * failures stay in this table.
  */
 export async function enqueueWebhookWork(input: WebhookWorkInput) {
   const resourceId = resourceIdBigInt(input);
+  const unique = {
+    shop: input.shop,
+    handler: input.handler,
+    resourceId,
+  };
+  const fields = webhookWorkWriteData(input);
 
-  return prisma.webhookFailure.upsert({
-    where: {
-      shop_handler_resourceId: {
+  try {
+    return await prisma.webhookFailure.upsert({
+      where: { shop_handler_resourceId: unique },
+      create: {
         shop: input.shop,
         handler: input.handler,
         resourceId,
+        ...fields,
       },
-    },
-    create: {
-      shop: input.shop,
-      handler: input.handler,
-      topic: input.topic,
-      resourceId,
-      resourceGid: input.resourceGid ?? null,
-      webhookId: input.webhookId ?? null,
-      payload: input.payload as object,
-      status: WebhookFailureStatus.pending,
-      outcome: null,
-      errorCode: null,
-      errorMessage: null,
-      attempts: 0,
-      lastAttemptAt: null,
-      completedAt: null,
-    },
-    update: {
-      topic: input.topic,
-      resourceGid: input.resourceGid ?? undefined,
-      webhookId: input.webhookId ?? undefined,
-      payload: input.payload as object,
-      status: WebhookFailureStatus.pending,
-      outcome: null,
-      errorCode: null,
-      errorMessage: null,
-      attempts: 0,
-      lastAttemptAt: null,
-      completedAt: null,
-    },
-  });
+      update: {
+        topic: fields.topic,
+        resourceGid: fields.resourceGid ?? undefined,
+        webhookId: fields.webhookId ?? undefined,
+        payload: fields.payload,
+        status: fields.status,
+        outcome: fields.outcome,
+        errorCode: fields.errorCode,
+        errorMessage: fields.errorMessage,
+        attempts: fields.attempts,
+        lastAttemptAt: fields.lastAttemptAt,
+        completedAt: fields.completedAt,
+      },
+    });
+  } catch (error) {
+    // Concurrent webhooks for the same product race the unique key.
+    if (!isPrismaErrorCode(error, "P2002")) throw error;
+    return prisma.webhookFailure.update({
+      where: { shop_handler_resourceId: unique },
+      data: {
+        topic: fields.topic,
+        resourceGid: fields.resourceGid ?? undefined,
+        webhookId: fields.webhookId ?? undefined,
+        payload: fields.payload,
+        status: fields.status,
+        outcome: fields.outcome,
+        errorCode: fields.errorCode,
+        errorMessage: fields.errorMessage,
+        attempts: fields.attempts,
+        lastAttemptAt: fields.lastAttemptAt,
+        completedAt: fields.completedAt,
+      },
+    });
+  }
+}
+
+/** Never throw to the webhook HTTP handler — Shopify 500s retry and amplify load. */
+export async function tryEnqueueWebhookWork(input: WebhookWorkInput) {
+  try {
+    return { row: await enqueueWebhookWork(input), error: null as string | null };
+  } catch (error) {
+    const message = await formatError(error);
+    console.error(
+      `[webhook-queue] enqueue failed shop=${input.shop} ` +
+        `handler=${input.handler} resourceId=${input.resourceId} ${message}`,
+    );
+    return { row: null, error: message };
+  }
 }
 
 export async function recoverStaleWebhookFailures(): Promise<number> {
@@ -293,8 +343,7 @@ export type ProcessWebhookWorkResult =
   | { status: "failure"; code: string; message: string };
 
 /**
- * Run the handler immediately. Webhook HTTP routes enqueue + schedule instead
- * so Shopify can be acked within 5s.
+ * Run the handler immediately (Cloud Run Pub/Sub worker / admin retry).
  */
 export async function processWebhookWork(
   input: WebhookWorkInput,
@@ -479,46 +528,6 @@ export async function processWebhookFailure(
       message,
     };
   }
-}
-
-function getNetlifyWaitUntil():
-  | ((promise: Promise<unknown>) => void)
-  | undefined {
-  const context = (
-    globalThis as {
-      Netlify?: {
-        context?: { waitUntil?: (promise: Promise<unknown>) => void } | null;
-      };
-    }
-  ).Netlify?.context;
-  const waitUntil = context?.waitUntil;
-  return waitUntil ? waitUntil.bind(context) : undefined;
-}
-
-/**
- * Run queued work after the webhook HTTP response is sent. Uses Netlify
- * `waitUntil` in production so the instance stays alive; locally the promise
- * is detached. Cron still drains anything left pending/failed.
- */
-export function scheduleWebhookProcessing(
-  failureId: string,
-  graphql?: GraphqlRequest,
-): "waitUntil" | "detached" {
-  const run = processWebhookFailure(failureId, graphql).catch(
-    async (error: unknown) => {
-      console.error(
-        `[webhook-queue] after-ack id=${failureId}`,
-        await formatError(error),
-      );
-    },
-  );
-  const waitUntil = getNetlifyWaitUntil();
-  if (waitUntil) {
-    waitUntil(run);
-    return "waitUntil";
-  }
-  void run;
-  return "detached";
 }
 
 /**

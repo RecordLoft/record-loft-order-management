@@ -1,0 +1,28 @@
+# Cloud Run worker. Build from the repo root:
+#   docker build -f Dockerfile.worker -t shopify-webhooks .
+#   gcloud run deploy shopify-webhooks --source=. --dockerfile=Dockerfile.worker ...
+FROM node:22-alpine
+RUN apk add --no-cache openssl
+
+WORKDIR /app
+
+ENV PORT=8080
+
+COPY package.json yarn.lock ./
+COPY prisma ./prisma
+COPY prisma.config.ts ./
+COPY tsconfig.json ./
+
+RUN corepack enable \
+  && yarn install --frozen-lockfile \
+  && DIRECT_URL="postgresql://127.0.0.1:5432/postgres" yarn prisma generate
+
+COPY app ./app
+COPY worker ./worker
+COPY certs ./certs
+
+ENV NODE_ENV=production
+
+EXPOSE 8080
+
+CMD ["yarn", "worker"]

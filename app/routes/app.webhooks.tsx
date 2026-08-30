@@ -4,6 +4,7 @@ import {
   BlockStack,
   Button,
   Card,
+  Checkbox,
   IndexTable,
   Layout,
   Link,
@@ -11,11 +12,12 @@ import {
   Select,
   Text,
 } from "@shopify/polaris";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import {
   useFetcher,
   useLoaderData,
+  useRevalidator,
   useSearchParams,
 } from "react-router";
 import type {
@@ -40,6 +42,8 @@ const HANDLER_LABELS = {
   orders_create: "Orders create",
   product_description_sync: "Product description",
 } as const satisfies Record<WebhookFailureHandler, string>;
+
+const REFRESH_MS = 10_000;
 
 type SerializedJob = {
   id: string;
@@ -174,7 +178,9 @@ function statusBadge(status: WebhookFailureStatus) {
 export default function WebhookFailuresPage() {
   const { shop, jobs, counts, total, status } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
+  const { revalidate, state: revalidatorState } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [banner, setBanner] = useState<{
     tone: "success" | "critical";
     message: string;
@@ -184,6 +190,30 @@ export default function WebhookFailuresPage() {
     fetcher.state !== "idle" ? String(fetcher.formData?.get("id") ?? "") : "";
   const retryingAll =
     fetcher.state !== "idle" && fetcher.formData?.get("intent") === "retry_all";
+  const refreshBlocked =
+    revalidatorState !== "idle" || fetcher.state !== "idle";
+  const refreshBlockedRef = useRef(refreshBlocked);
+  refreshBlockedRef.current = refreshBlocked;
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+
+    const refresh = () => {
+      if (document.hidden || refreshBlockedRef.current) return;
+      revalidate();
+    };
+
+    refresh();
+    const interval = window.setInterval(refresh, REFRESH_MS);
+    const onVisibility = () => {
+      if (!document.hidden) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [autoRefresh, revalidate]);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data?.message) return;
@@ -231,26 +261,33 @@ export default function WebhookFailuresPage() {
             )}
 
             <Card>
-              <Select
-                label="Status"
-                labelHidden
-                options={[
-                  { label: `All (${total})`, value: "all" },
-                  { label: `Pending (${counts.pending})`, value: "pending" },
-                  {
-                    label: `Processing (${counts.processing})`,
-                    value: "processing",
-                  },
-                  { label: `Failed (${counts.failed})`, value: "failed" },
-                ]}
-                value={status}
-                onChange={(value) => {
-                  const params = new URLSearchParams(searchParams);
-                  if (value === "all") params.delete("status");
-                  else params.set("status", value);
-                  setSearchParams(params);
-                }}
-              />
+              <BlockStack gap="300">
+                <Select
+                  label="Status"
+                  labelHidden
+                  options={[
+                    { label: `All (${total})`, value: "all" },
+                    { label: `Pending (${counts.pending})`, value: "pending" },
+                    {
+                      label: `Processing (${counts.processing})`,
+                      value: "processing",
+                    },
+                    { label: `Failed (${counts.failed})`, value: "failed" },
+                  ]}
+                  value={status}
+                  onChange={(value) => {
+                    const params = new URLSearchParams(searchParams);
+                    if (value === "all") params.delete("status");
+                    else params.set("status", value);
+                    setSearchParams(params);
+                  }}
+                />
+                <Checkbox
+                  label="Auto-refresh every 10 seconds"
+                  checked={autoRefresh}
+                  onChange={setAutoRefresh}
+                />
+              </BlockStack>
             </Card>
 
             {jobs.length === 0 ? (
