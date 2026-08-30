@@ -46,6 +46,9 @@ const RETRYING_STATUSES: WebhookFailureStatus[] = [
 
 const HANDLER_LABELS = {
   orders_create: "Orders create",
+  orders_cancelled: "Orders cancelled",
+  orders_fulfilled: "Orders fulfilled",
+  refunds_create: "Refunds create",
   product_description_sync: "Product description",
   ack_drop: "Dropped (invalid)",
 } as const satisfies Record<WebhookFailureHandler, string>;
@@ -71,7 +74,12 @@ function resourceAdminUrl(
   handler: WebhookFailureHandler,
   resourceId: string,
 ): string | null {
-  if (handler === "orders_create") {
+  if (
+    handler === "orders_create" ||
+    handler === "orders_cancelled" ||
+    handler === "orders_fulfilled" ||
+    handler === "refunds_create"
+  ) {
     return `https://${shop}/admin/orders/${resourceId}`;
   }
   if (handler === "product_description_sync") {

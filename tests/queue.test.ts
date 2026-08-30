@@ -8,6 +8,9 @@ const {
   prismaMock,
   handleOrdersCreate,
   handleProductDescriptionSync,
+  handleOrdersCancelled,
+  handleOrdersFulfilled,
+  handleRefundsCreate,
 } = vi.hoisted(() => {
   const prismaMock = {
     webhookFailure: {
@@ -24,6 +27,9 @@ const {
     prismaMock,
     handleOrdersCreate: vi.fn(),
     handleProductDescriptionSync: vi.fn(),
+    handleOrdersCancelled: vi.fn(),
+    handleOrdersFulfilled: vi.fn(),
+    handleRefundsCreate: vi.fn(),
   };
 });
 
@@ -42,6 +48,12 @@ vi.mock("../webhooks/orders-create.handler.server", () => ({
 
 vi.mock("../webhooks/product-description.handler.server", () => ({
   handleProductDescriptionSync,
+}));
+
+vi.mock("../webhooks/orders-lifecycle.handler.server", () => ({
+  handleOrdersCancelled,
+  handleOrdersFulfilled,
+  handleRefundsCreate,
 }));
 
 import {
@@ -139,6 +151,42 @@ describe("processWebhookWork", () => {
     });
     expect(prismaMock.webhookFailure.deleteMany).toHaveBeenCalled();
     expect(prismaMock.webhookFailure.upsert).not.toHaveBeenCalled();
+  });
+
+  it("runs cancel/refund handlers without an admin session", async () => {
+    handleOrdersCancelled.mockResolvedValue({
+      outcome: "completed",
+      detail: "cancelled",
+    });
+    const cancelWork: WebhookWorkInput = {
+      ...work,
+      handler: WebhookFailureHandler.orders_cancelled,
+      topic: "ORDERS_CANCELLED",
+    };
+    await expect(processWebhookWork(cancelWork)).resolves.toEqual({
+      status: "success",
+      outcome: "completed",
+      detail: "cancelled",
+    });
+    expect(handleOrdersCancelled).toHaveBeenCalled();
+  });
+
+  it("runs fulfilled handlers without an admin session", async () => {
+    handleOrdersFulfilled.mockResolvedValue({
+      outcome: "completed",
+      detail: "fulfilled",
+    });
+    const fulfilledWork: WebhookWorkInput = {
+      ...work,
+      handler: WebhookFailureHandler.orders_fulfilled,
+      topic: "ORDERS_FULFILLED",
+    };
+    await expect(processWebhookWork(fulfilledWork)).resolves.toEqual({
+      status: "success",
+      outcome: "completed",
+      detail: "fulfilled",
+    });
+    expect(handleOrdersFulfilled).toHaveBeenCalled();
   });
 
   it("retries a retryable handler error before max attempts", async () => {
@@ -382,6 +430,7 @@ describe("recordAckDrop and listWebhookFailures", () => {
       resourceId: 9,
       reason: "payload missing id",
       payload: { title: "x" },
+      webhookId: "wh-a",
     });
     expect(prismaMock.webhookFailure.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -393,6 +442,19 @@ describe("recordAckDrop and listWebhookFailures", () => {
         }),
       }),
     );
+    const firstId = prismaMock.webhookFailure.upsert.mock.calls[0]?.[0]?.create
+      ?.resourceId as bigint;
+
+    await recordAckDrop({
+      shop: "record-loft.myshopify.com",
+      topic: "products/update",
+      reason: "payload missing id",
+      webhookId: "wh-b",
+    });
+    const secondId = prismaMock.webhookFailure.upsert.mock.calls[1]?.[0]?.create
+      ?.resourceId as bigint;
+    expect(firstId).not.toEqual(secondId);
+    expect(firstId).not.toBe(0n);
   });
 
   it("lists failures for a shop with optional filters", async () => {

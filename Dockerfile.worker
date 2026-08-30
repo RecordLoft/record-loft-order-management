@@ -6,6 +6,8 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 ENV PORT=8080
+ENV HUSKY=0
+ENV NODE_ENV=production
 
 COPY package.json yarn.lock ./
 COPY prisma ./prisma
@@ -13,14 +15,12 @@ COPY prisma.config.ts ./
 COPY tsconfig.json ./
 
 RUN corepack enable \
-  && yarn install --frozen-lockfile \
+  && yarn install --frozen-lockfile --ignore-scripts \
   && DIRECT_URL="postgresql://127.0.0.1:5432/postgres" yarn prisma generate
 
 COPY app ./app
 COPY webhooks ./webhooks
 COPY certs ./certs
-
-ENV NODE_ENV=production
 
 EXPOSE 8080
 

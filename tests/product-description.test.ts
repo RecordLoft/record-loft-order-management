@@ -183,6 +183,19 @@ describe("syncProductDescription", () => {
       code: "product_not_found",
     });
   });
+
+  it("returns retryable graphql_errors when metafield fetch is throttled", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({ errors: [{ message: "Throttled" }] }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toMatchObject({
+      outcome: "error",
+      code: "graphql_errors",
+      message: JSON.stringify([{ message: "Throttled" }]),
+    });
+  });
 });
 
 describe("syncProductDescription", () => {
@@ -382,6 +395,19 @@ describe("handleProductDescriptionSync", () => {
       outcome: "error",
       code: "product_not_found",
       retry: false,
+    });
+  });
+
+  it("retries graphql_errors from the product fetch", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({ errors: [{ message: "Throttled" }] }),
+    );
+    await expect(
+      handleProductDescriptionSync("record-loft.myshopify.com", { id: 1 }, graphql),
+    ).resolves.toMatchObject({
+      outcome: "error",
+      code: "graphql_errors",
+      retry: true,
     });
   });
 

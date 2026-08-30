@@ -1,10 +1,12 @@
 import { prisma } from "../app/db.server";
+import { applyOrderImportPending } from "../app/order-import-pending.server";
 import type { GraphqlRequest } from "./product-description.server";
 import {
   listFulfillmentOrdersForOrder,
   markFulfillmentOrdersInProgress,
   type FulfillmentOrderForProgress,
 } from "./shopify-fulfillment.server";
+import type { WebhookHandlerResult } from "./types.server";
 
 type OrderWebhookPayload = {
   id: number;
@@ -33,9 +35,9 @@ type OrderWebhookPayload = {
   phone?: string | null;
   billing_address?: { phone?: string | null } | null;
   shipping_address?: { phone?: string | null } | null;
+  fulfillment_status?: string | null;
+  updated_at?: string | null;
 };
-
-import type { WebhookHandlerResult } from "./types.server";
 
 function flattenProperties(properties: { name: string; value: string }[]) {
   if (!properties || !Array.isArray(properties)) return {};
@@ -57,6 +59,17 @@ function resolveCustomerPhone(payload: OrderWebhookPayload) {
     shipping_address?.phone ??
     null
   );
+}
+
+function fulfilledAtFromPayload(payload: OrderWebhookPayload): Date | undefined {
+  if (payload.fulfillment_status?.trim().toLowerCase() !== "fulfilled") {
+    return undefined;
+  }
+  if (payload.updated_at) {
+    const parsed = new Date(payload.updated_at);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
 }
 
 export async function handleOrdersCreate(
@@ -157,33 +170,33 @@ export async function handleOrdersCreate(
         category: p.category?.name ?? null,
       });
     }
+  }
 
-    const listed = await listFulfillmentOrdersForOrder(
-      graphql,
-      `gid://shopify/Order/${id}`,
-    );
-    if (!listed.ok) {
-      return {
-        outcome: "error",
-        code: listed.code,
-        message: listed.message,
-        retry: listed.retryable,
-      };
-    }
-    fulfillmentOrders = listed.fulfillmentOrders;
+  const listed = await listFulfillmentOrdersForOrder(
+    graphql,
+    `gid://shopify/Order/${id}`,
+  );
+  if (!listed.ok) {
+    return {
+      outcome: "error",
+      code: listed.code,
+      message: listed.message,
+      retry: listed.retryable,
+    };
+  }
+  fulfillmentOrders = listed.fulfillmentOrders;
 
-    deliveryMethod =
-      fulfillmentOrders[0]?.deliveryMethod?.methodType?.toLowerCase() ?? null;
+  deliveryMethod =
+    fulfillmentOrders[0]?.deliveryMethod?.methodType?.toLowerCase() ?? null;
 
-    const hasRecordPlanetItem = line_items.some(
-      (item) =>
-        productMap.get(item.product_id?.toString() ?? "")?.productType ===
-        "Record Planet Shipping",
-    );
+  const hasRecordPlanetItem = line_items.some(
+    (item) =>
+      productMap.get(item.product_id?.toString() ?? "")?.productType ===
+      "Record Planet Shipping",
+  );
 
-    if (hasRecordPlanetItem) {
-      deliveryMethod = "recordPlanet";
-    }
+  if (hasRecordPlanetItem) {
+    deliveryMethod = "recordPlanet";
   }
 
   console.log(`[${threadId}] Attempting to import order ${BigInt(id)}`);
@@ -194,6 +207,7 @@ export async function handleOrdersCreate(
 
   const customerPhone = resolveCustomerPhone(payload);
   const orderId = BigInt(id);
+  const fulfilledAt = fulfilledAtFromPayload(payload);
   const lineItemRows = line_items.map((item) => {
     const enrichment = productMap.get(item.product_id?.toString() ?? "");
     return {
@@ -240,6 +254,7 @@ export async function handleOrdersCreate(
         currency,
         deliveryMethod,
         customerId: customer ? BigInt(customer.id) : undefined,
+        ...(fulfilledAt ? { fulfilledAt } : {}),
       },
       create: {
         id: orderId,
@@ -249,6 +264,7 @@ export async function handleOrdersCreate(
         currency,
         deliveryMethod,
         customerId: customer ? BigInt(customer.id) : null,
+        ...(fulfilledAt ? { fulfilledAt } : {}),
       },
     });
 
@@ -259,6 +275,8 @@ export async function handleOrdersCreate(
   });
 
   console.log(`[${threadId}] Imported order ${BigInt(id)}`);
+
+  await applyOrderImportPending(orderId);
 
   if (deliveryMethod === "recordPlanet") {
     const progress = await markFulfillmentOrdersInProgress(

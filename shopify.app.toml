@@ -26,6 +26,18 @@ api_version = "2026-04"
   topics = [ "orders/create" ]
 
   [[webhooks.subscriptions]]
+  uri = "pubsub://record-loft:shopify-orders"
+  topics = [ "orders/cancelled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "pubsub://record-loft:shopify-orders"
+  topics = [ "orders/fulfilled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "pubsub://record-loft:shopify-orders"
+  topics = [ "refunds/create" ]
+
+  [[webhooks.subscriptions]]
   uri = "pubsub://record-loft:shopify-products"
   topics = [ "products/create" ]
 

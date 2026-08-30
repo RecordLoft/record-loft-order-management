@@ -82,7 +82,7 @@ export async function listFulfillmentOrdersForOrder(
     if (json.errors) {
       return {
         ok: false,
-        retryable: false,
+        retryable: true,
         code: "graphql_errors",
         message: JSON.stringify(json.errors),
       };
@@ -104,12 +104,24 @@ function supportsReportProgress(fo: FulfillmentOrderForProgress): boolean {
   );
 }
 
+const DONE_FULFILLMENT_STATUSES = new Set([
+  "IN_PROGRESS",
+  "CLOSED",
+  "CANCELLED",
+  "FULFILLED",
+]);
+
+function isFulfillmentDone(fo: FulfillmentOrderForProgress): boolean {
+  return DONE_FULFILLMENT_STATUSES.has(fo.status.toUpperCase());
+}
+
 export type MarkInProgressResult =
   | { ok: true; marked: number }
   | { ok: false; retryable: boolean; code: string; message: string };
 
 /**
  * Marks merchant-managed fulfillment orders as in progress via REPORT_PROGRESS.
+ * Attempts every eligible FO, then returns a single result. Leftover OPEN is not success.
  */
 export async function markFulfillmentOrdersInProgress(
   graphql: GraphqlRequest,
@@ -132,21 +144,31 @@ export async function markFulfillmentOrdersInProgress(
   const alreadyInProgress = fulfillmentOrders.filter(
     (fo) => fo.status === "IN_PROGRESS",
   );
+  const leftoverOpen = fulfillmentOrders.filter((fo) => !isFulfillmentDone(fo));
 
   if (eligible.length === 0) {
+    if (leftoverOpen.length > 0) {
+      log(
+        `Fulfillment orders not ready for REPORT_PROGRESS (statuses: ${fulfillmentOrders.map((fo) => fo.status).join(", ")})`,
+      );
+      return {
+        ok: false,
+        retryable: true,
+        code: "fulfillment_orders_not_ready",
+        message: `Fulfillment orders not ready (statuses: ${fulfillmentOrders.map((fo) => fo.status).join(", ")})`,
+      };
+    }
     if (alreadyInProgress.length > 0) {
       log(
         `Fulfillment already in progress (${alreadyInProgress.length} order(s))`,
       );
-      return { ok: true, marked: 0 };
     }
-    log(
-      `No fulfillment orders eligible for REPORT_PROGRESS (statuses: ${fulfillmentOrders.map((fo) => fo.status).join(", ")})`,
-    );
     return { ok: true, marked: 0 };
   }
 
   let marked = 0;
+  const graphqlErrors: unknown[] = [];
+  const userErrorMessages: string[] = [];
   const progressReport = options?.reasonNotes
     ? { reasonNotes: options.reasonNotes }
     : undefined;
@@ -167,29 +189,52 @@ export async function markFulfillmentOrdersInProgress(
     };
 
     if (json.errors) {
-      return {
-        ok: false,
-        retryable: false,
-        code: "graphql_errors",
-        message: JSON.stringify(json.errors),
-      };
+      graphqlErrors.push(json.errors);
+      continue;
     }
 
     const payload = json.data?.fulfillmentOrderReportProgress;
     const userErrors = payload?.userErrors ?? [];
     if (userErrors.length > 0) {
-      return {
-        ok: false,
-        retryable: false,
-        code: "fulfillment_report_progress_failed",
-        message: userErrors.map((e) => e.message).join("; "),
-      };
+      userErrorMessages.push(
+        ...userErrors.map((e) => e.message),
+      );
+      continue;
     }
 
     marked += 1;
     log(
       `Marked fulfillment order ${fo.id} in progress (status: ${payload?.fulfillmentOrder?.status ?? "unknown"})`,
     );
+  }
+
+  if (graphqlErrors.length > 0) {
+    const suffix = marked > 0 ? `; marked ${marked} before GraphQL errors` : "";
+    return {
+      ok: false,
+      retryable: true,
+      code: "graphql_errors",
+      message: `${JSON.stringify(graphqlErrors)}${suffix}`,
+    };
+  }
+
+  if (userErrorMessages.length > 0) {
+    const suffix = marked > 0 ? `; marked ${marked}` : "";
+    return {
+      ok: false,
+      retryable: false,
+      code: "fulfillment_report_progress_failed",
+      message: `${userErrorMessages.join("; ")}${suffix}`,
+    };
+  }
+
+  if (marked < eligible.length) {
+    return {
+      ok: false,
+      retryable: true,
+      code: "fulfillment_orders_not_ready",
+      message: `Marked ${marked} of ${eligible.length} eligible fulfillment orders`,
+    };
   }
 
   return { ok: true, marked };

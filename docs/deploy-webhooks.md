@@ -1,12 +1,12 @@
 # Deploy the webhook worker
 
-GitHub Actions builds `Dockerfile.worker` (the Cloud Run image; there is no app `Dockerfile`) and deploys Cloud Run `shopify-webhooks` on push to `main` (path-filtered) or **Actions → Deploy webhooks → Run workflow**. Test and typecheck run separately in the `CI` workflow.
+GitHub Actions builds `Dockerfile.worker` (the Cloud Run image; there is no app `Dockerfile`) and deploys Cloud Run `shopify-webhooks` on push to `main` (path-filtered) or **Actions → Deploy webhooks → Run workflow**. Jobs run in order: **test** (`yarn test` + `yarn typecheck`) → **migrate** (`yarn prisma migrate deploy`) → **deploy**.
 
-If the deploy includes a Prisma schema change, run `yarn prisma migrate deploy` against Aiven **before** the new revision starts. The worker image does not run migrations.
+The migrate job needs GitHub secrets `DATABASE_URL` and `DIRECT_URL` (Aiven). Without them the workflow fails before Cloud Run updates, so a schema-changing revision cannot start against an unmigrated database. The worker image still does not run migrations itself.
 
-Auth is **Workload Identity Federation**. There is no GCP JSON key in GitHub.
+Auth for the deploy job is **Workload Identity Federation**. There is no GCP JSON key in GitHub.
 
-Existing Cloud Run env (`DATABASE_URL`, Shopify client id/secret, `SCOPES`, `SHOPIFY_APP_URL`) is left as-is. The workflow does not pass secrets.
+Existing Cloud Run env (`DATABASE_URL`, Shopify client id/secret, `SCOPES`, `SHOPIFY_APP_URL`) is left as-is. Only the migrate job uses `DATABASE_URL` / `DIRECT_URL` from secrets.
 
 ## One-time GCP + GitHub setup
 
@@ -69,6 +69,8 @@ echo "Add these GitHub repo variables (Settings → Secrets and variables → Ac
 echo "  GCP_WIF_PROVIDER=projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/providers/${PROVIDER}"
 echo "  GCP_DEPLOY_SA=${SA}"
 ```
+
+Also add **secrets** `DATABASE_URL` and `DIRECT_URL` (Aiven) so the migrate job can run `prisma migrate deploy` before Cloud Run updates.
 
 The first `gcloud run deploy` from Actions can take a minute. After that, image layers cache on the runner.
 

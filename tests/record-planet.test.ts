@@ -23,6 +23,7 @@ import {
   isVisiblePropertyKey,
   matchingOrderIds,
   parseProperties,
+  recordPlanetClosedLabel,
   recordPlanetOrderWhere,
   toIlikePattern,
 } from "../app/record-planet.server";
@@ -56,6 +57,24 @@ describe("Record Planet property helpers", () => {
     expect(toIlikePattern("50% off")).toBe("%50\\% off%");
     expect(toIlikePattern("a_b")).toBe("%a\\_b%");
     expect(toIlikePattern("a\\b")).toBe("%a\\\\b%");
+  });
+
+  it("labels closed orders", () => {
+    const none = { cancelledAt: null, refundedAt: null, fulfilledAt: null };
+    expect(recordPlanetClosedLabel(none)).toBeNull();
+    expect(
+      recordPlanetClosedLabel({
+        ...none,
+        fulfilledAt: new Date("2026-08-02T00:00:00Z"),
+      }),
+    ).toBe("Fulfilled");
+    expect(
+      recordPlanetClosedLabel({
+        cancelledAt: new Date("2026-08-01T00:00:00Z"),
+        refundedAt: new Date("2026-08-01T00:00:00Z"),
+        fulfilledAt: new Date("2026-08-02T00:00:00Z"),
+      }),
+    ).toBe("Cancelled");
   });
 });
 
@@ -103,12 +122,27 @@ describe("recordPlanetOrderWhere and search aggregation", () => {
     authenticateAdmin.mockResolvedValue({ session: { shop } });
   });
 
-  it("returns the shop + recordPlanet filter when search is empty", async () => {
+  it("returns the shop + recordPlanet + active filter when search is empty", async () => {
     await expect(recordPlanetOrderWhere(shop, "  ")).resolves.toEqual({
       shop,
       deliveryMethod: "recordPlanet",
+      cancelledAt: null,
+      refundedAt: null,
+      fulfilledAt: null,
     });
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it("filters cancelled, refunded, and fulfilled orders when view is closed", async () => {
+    await expect(recordPlanetOrderWhere(shop, "", "closed")).resolves.toEqual({
+      shop,
+      deliveryMethod: "recordPlanet",
+      OR: [
+        { cancelledAt: { not: null } },
+        { refundedAt: { not: null } },
+        { fulfilledAt: { not: null } },
+      ],
+    });
   });
 
   it("uses a sentinel id when search matches nothing", async () => {
@@ -116,6 +150,9 @@ describe("recordPlanetOrderWhere and search aggregation", () => {
     await expect(recordPlanetOrderWhere(shop, "zzz")).resolves.toEqual({
       shop,
       deliveryMethod: "recordPlanet",
+      cancelledAt: null,
+      refundedAt: null,
+      fulfilledAt: null,
       id: { in: [BigInt(-1)] },
     });
   });
@@ -153,6 +190,9 @@ describe("Record Planet loader", () => {
         createdAt: new Date("2026-01-02T00:00:00Z"),
         customerId: 9n,
         ospStatusName: "Ready",
+        cancelledAt: null,
+        refundedAt: null,
+        fulfilledAt: null,
         customer: {
           id: 9n,
           email: "ada@example.com",
@@ -174,6 +214,9 @@ describe("Record Planet loader", () => {
         createdAt: new Date("2026-01-03T00:00:00Z"),
         customerId: 9n,
         ospStatusName: null,
+        cancelledAt: null,
+        refundedAt: null,
+        fulfilledAt: null,
         customer: {
           id: 9n,
           email: "ada@example.com",
@@ -189,6 +232,9 @@ describe("Record Planet loader", () => {
         createdAt: new Date("2026-01-01T00:00:00Z"),
         customerId: null,
         ospStatusName: null,
+        cancelledAt: null,
+        refundedAt: null,
+        fulfilledAt: null,
         customer: null,
         lineItems: [],
       },
@@ -210,5 +256,7 @@ describe("Record Planet loader", () => {
     });
     expect(result.customerGroups[0]?.orders[0]?.status).toBe("Unknown");
     expect(result.customerGroups[0]?.orders[1]?.status).toEqual({ name: "Ready" });
+    expect(result.view).toBe("active");
+    expect(result.customerGroups[0]?.orders[0]?.closedLabel).toBeNull();
   });
 });

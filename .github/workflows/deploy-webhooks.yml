@@ -8,6 +8,7 @@ on:
       - "app/db.server.ts"
       - "app/shopify.server.ts"
       - "app/shopify-app-session-storage-prisma.js"
+      - "app/order-import-pending.server.ts"
       - "prisma/**"
       - "prisma.config.ts"
       - "certs/**"
@@ -27,7 +28,64 @@ env:
   IMAGE_NAME: shopify-webhooks
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      HUSKY: "0"
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: yarn prisma generate
+
+      - name: Test
+        run: yarn test
+
+      - name: Typecheck
+        run: yarn typecheck
+
+  migrate:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Check migrate secrets
+        run: |
+          if [ -z "${{ secrets.DATABASE_URL }}" ] || [ -z "${{ secrets.DIRECT_URL }}" ]; then
+            echo "Set GitHub secrets DATABASE_URL and DIRECT_URL (Aiven)."
+            echo "See docs/deploy-webhooks.md"
+            exit 1
+          fi
+
+      - name: Migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+        run: yarn prisma migrate deploy
+
   deploy:
+    needs: migrate
     runs-on: ubuntu-latest
     permissions:
       contents: read

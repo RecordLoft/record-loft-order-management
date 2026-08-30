@@ -27,7 +27,7 @@ export function allowedTopicsFromEnv(
   raw = process.env.ALLOWED_TOPICS,
 ): Set<string> {
   return new Set(
-    (raw ?? "products/create,products/update,orders/create")
+    (raw ?? "products/create,products/update,orders/create,orders/cancelled,orders/fulfilled,refunds/create")
       .split(",")
       .map((topic) => topic.trim().toLowerCase())
       .filter(Boolean),
@@ -39,10 +39,26 @@ export const workerState = {
   inFlight: 0,
 };
 
+export const MAX_PUSH_BODY_BYTES = 2_000_000;
+export const DRAIN_TIMEOUT_MS = 50_000;
+
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super("body too large");
+    this.name = "BodyTooLargeError";
+  }
+}
+
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buf.length;
+    if (size > MAX_PUSH_BODY_BYTES) {
+      throw new BodyTooLargeError();
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw) return null;
@@ -74,10 +90,12 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
   let envelope: PubSubPushEnvelope;
   try {
     envelope = (await readJson(req)) as PubSubPushEnvelope;
-  } catch {
-    console.warn("[pubsub-worker] ack-drop reason=invalid json");
-    await persistAckDrop({}, "invalid json");
-    send(res, 200, { status: "ignored", reason: "invalid json" });
+  } catch (error) {
+    const reason =
+      error instanceof BodyTooLargeError ? "body too large" : "invalid json";
+    console.warn(`[pubsub-worker] ack-drop reason=${reason}`);
+    await persistAckDrop({}, reason);
+    send(res, 200, { status: "ignored", reason });
     return;
   }
 
@@ -205,12 +223,13 @@ export function handleWorkerRequest(
   send(res, 404, { status: "not_found" });
 }
 
-function drainAndExit() {
-  if (workerState.inFlight > 0) {
-    setTimeout(drainAndExit, 50);
+export function drainAndExit(deadline = Date.now() + DRAIN_TIMEOUT_MS) {
+  if (workerState.inFlight > 0 && Date.now() < deadline) {
+    setTimeout(() => drainAndExit(deadline), 50);
     return;
   }
-  closeDb().finally(() => process.exit(0));
+  const forced = workerState.inFlight > 0;
+  closeDb().finally(() => process.exit(forced ? 1 : 0));
 }
 
 export function startWorker() {

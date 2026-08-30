@@ -20,6 +20,71 @@ function envelope(payload: unknown, attributes: Record<string, string>) {
 }
 
 describe("parsePubSubPush", () => {
+  it("maps orders/cancelled and uses the order id", () => {
+    const result = parsePubSubPush(
+      envelope(
+        { id: 99, cancelled_at: "2026-08-01T00:00:00Z" },
+        {
+          "X-Shopify-Topic": "orders/cancelled",
+          "X-Shopify-Shop-Domain": "record-loft.myshopify.com",
+        },
+      ),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.parsed.handler).toBe(WebhookFailureHandler.orders_cancelled);
+    expect(result.parsed.work.resourceId).toBe(99);
+    expect(result.parsed.work.resourceGid).toBe("gid://shopify/Order/99");
+  });
+
+  it("maps orders/fulfilled and uses the order id", () => {
+    const result = parsePubSubPush(
+      envelope(
+        { id: 99, fulfillment_status: "fulfilled" },
+        {
+          "X-Shopify-Topic": "orders/fulfilled",
+          "X-Shopify-Shop-Domain": "record-loft.myshopify.com",
+        },
+      ),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.parsed.handler).toBe(WebhookFailureHandler.orders_fulfilled);
+    expect(result.parsed.work.resourceId).toBe(99);
+    expect(result.parsed.work.resourceGid).toBe("gid://shopify/Order/99");
+  });
+
+  it("maps refunds/create to the order_id, not the refund id", () => {
+    const result = parsePubSubPush(
+      envelope(
+        { id: 555, order_id: 99 },
+        {
+          "X-Shopify-Topic": "refunds/create",
+          "X-Shopify-Shop-Domain": "record-loft.myshopify.com",
+        },
+      ),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.parsed.handler).toBe(WebhookFailureHandler.refunds_create);
+    expect(result.parsed.work.resourceId).toBe(99);
+    expect(result.parsed.work.resourceGid).toBe("gid://shopify/Order/99");
+  });
+
+  it("ack-drops refunds/create without order_id", () => {
+    expect(
+      parsePubSubPush(
+        envelope(
+          { id: 555 },
+          {
+            "X-Shopify-Topic": "refunds/create",
+            "X-Shopify-Shop-Domain": "record-loft.myshopify.com",
+          },
+        ),
+      ),
+    ).toEqual({ ok: false, reason: "payload missing order_id" });
+  });
+
   it("maps orders/create to the order handler", () => {
     const result = parsePubSubPush(
       envelope(

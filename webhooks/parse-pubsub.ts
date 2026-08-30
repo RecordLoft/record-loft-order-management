@@ -28,6 +28,12 @@ const TOPIC_HANDLERS: Record<string, WebhookFailureHandler> = {
   products_update: WebhookFailureHandler.product_description_sync,
   "orders/create": WebhookFailureHandler.orders_create,
   orders_create: WebhookFailureHandler.orders_create,
+  "orders/cancelled": WebhookFailureHandler.orders_cancelled,
+  orders_cancelled: WebhookFailureHandler.orders_cancelled,
+  "orders/fulfilled": WebhookFailureHandler.orders_fulfilled,
+  orders_fulfilled: WebhookFailureHandler.orders_fulfilled,
+  "refunds/create": WebhookFailureHandler.refunds_create,
+  refunds_create: WebhookFailureHandler.refunds_create,
 };
 
 export function normalizeTopic(raw: string): string {
@@ -75,18 +81,22 @@ export function isAdminRetry(
   return attribute(attributes, ADMIN_RETRY_ATTRIBUTE) === ADMIN_RETRY_VALUE;
 }
 
-/** Best-effort shop / topic / id from a push we are about to ack-drop. */
 export function ackDropContext(envelope: PubSubPushEnvelope): {
   shop?: string;
   topic?: string;
   resourceId?: number;
   payload?: unknown;
+  webhookId?: string;
+  messageId?: string;
 } {
   const attributes = envelope.message?.attributes;
   const shop = attribute(attributes, "X-Shopify-Shop-Domain");
   const topic = attribute(attributes, "X-Shopify-Topic");
+  const webhookId = attribute(attributes, "X-Shopify-Webhook-Id");
+  const messageId =
+    envelope.message?.messageId ?? envelope.message?.message_id;
   if (!envelope.message?.data) {
-    return { shop, topic };
+    return { shop, topic, webhookId, messageId };
   }
   try {
     const decoded = JSON.parse(
@@ -100,11 +110,28 @@ export function ackDropContext(envelope: PubSubPushEnvelope): {
         : typeof rawId === "string" && /^\d+$/.test(rawId)
           ? Number(rawId)
           : undefined;
-    return { shop, topic, resourceId, payload };
+    return { shop, topic, resourceId, payload, webhookId, messageId };
   } catch {
-    return { shop, topic };
+    return { shop, topic, webhookId, messageId };
   }
 }
+
+function numericResourceId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return null;
+}
+
+const ORDER_HANDLERS = new Set<WebhookFailureHandler>([
+  WebhookFailureHandler.orders_create,
+  WebhookFailureHandler.orders_cancelled,
+  WebhookFailureHandler.orders_fulfilled,
+  WebhookFailureHandler.refunds_create,
+]);
 
 export function parsePubSubPush(
   envelope: PubSubPushEnvelope,
@@ -152,15 +179,22 @@ export function parsePubSubPush(
     return { ok: false, reason: `unsupported topic ${topic}` };
   }
 
-  const resourceId = Number(payload.id);
-  if (!Number.isFinite(resourceId)) {
-    return { ok: false, reason: "payload.id is not a number" };
+  let resourceId: number | null;
+  if (handler === WebhookFailureHandler.refunds_create) {
+    resourceId = numericResourceId(payload.order_id ?? payload.orderId);
+    if (resourceId == null) {
+      return { ok: false, reason: "payload missing order_id" };
+    }
+  } else {
+    resourceId = numericResourceId(payload.id);
+    if (resourceId == null) {
+      return { ok: false, reason: "payload.id is not a number" };
+    }
   }
 
   const webhookId =
     attribute(message.attributes, "X-Shopify-Webhook-Id") ?? null;
-  const resourceKind =
-    handler === WebhookFailureHandler.orders_create ? "Order" : "Product";
+  const resourceKind = ORDER_HANDLERS.has(handler) ? "Order" : "Product";
 
   const work: WebhookWorkInput = {
     shop,

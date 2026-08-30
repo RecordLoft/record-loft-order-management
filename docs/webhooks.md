@@ -8,6 +8,7 @@ Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinat
 |---|---|---|
 | `products/create`, `products/update` | `pubsub://record-loft:shopify-products` | High volume. Shopify succeeds when GCP accepts the publish, not when GraphQL finishes. |
 | `orders/create` | `pubsub://record-loft:shopify-orders` | Same worker URL, separate topic so you can split later. |
+| `orders/cancelled`, `refunds/create`, `orders/fulfilled` | `pubsub://record-loft:shopify-orders` | Cancel, any refund (partial or full), and fully fulfilled. DB-only handlers. |
 | `app/uninstalled`, `app/scopes_update` | HTTPS on Netlify | Rare, part of the app install. Shopify HMAC via `authenticate.webhook()`. |
 | StatusPro | `/api/webhooks/order-status-pro/:token` | Third party, not Shopify HMAC. |
 
@@ -22,7 +23,7 @@ Shop event
           → Cloud Run shopify-webhooks
               → enqueue (coalesce same product/order)
               → claim row (pending → processing; steal if lease expired)
-              → handleProductDescriptionSync / handleOrdersCreate
+              → handleProductDescriptionSync / handleOrdersCreate / cancel / refund / fulfill
               → 200 ack or 500 retry
 ```
 
@@ -68,9 +69,9 @@ HTTPS `app/uninstalled` and `app/scopes_update` on Netlify still use `authentica
 
 - **Pending** — handler failed, `attempts < 5`, still retryable. Worker returns HTTP 500 so Pub/Sub redelivers.
 - **Processing** — a Cloud Run instance claimed the row and is running the handler. `lastAttemptAt` is the lease start. After 3 minutes the row is stale: Pub/Sub redelivery can steal the claim, and `/app/webhooks-admin` can Redrive it (badge **Stuck**).
-- **Failed** — attempt 5 exhausted, no offline session, or a terminal error (`product_not_found`, non-retryable GraphQL). Worker returns 200 so Pub/Sub stops. These rows are the DLQ.
+- **Failed** — attempt 5 exhausted, no offline session (product/create), or a terminal error (`product_not_found`, non-retryable GraphQL `userErrors`). Worker returns 200 so Pub/Sub stops. These rows are the DLQ.
 - **Success** — row is deleted.
-- **`ack_drop`** — invalid JSON, missing fields, or a topic the worker will not handle. Worker still returns 200 (stop Pub/Sub). The row is stored with handler `ack_drop` so it appears in the DLQ. Redrive skips these.
+- **`ack_drop`** — invalid JSON, oversized body, missing fields, or a topic the worker will not handle. Worker still returns 200 (stop Pub/Sub). The row is stored with handler `ack_drop` and a hashed unique `resourceId` so distinct poison messages do not overwrite each other. Redrive skips these.
 
 **App → Webhook DLQ** (`/app/webhooks-admin`) defaults to failed rows. **Redrive** publishes the stored payload back to Pub/Sub and resets `attempts` to 0. A new Shopify event for the same product/order does the same reset (fresh 5 tries) without opening the DLQ. Live pending / processing rows are read-only; stale processing (lease expired) can be redriven. Netlify does not run handlers.
 
@@ -118,7 +119,7 @@ Pub/Sub retries on HTTP 500 while `attempts < 5` and the error is retryable. Exh
 | `SHOPIFY_API_SECRET` | Partner **Client secret** |
 | `SCOPES` | Same list as `shopify.app.toml` |
 | `SHOPIFY_APP_URL` | Netlify app URL (library init, not ingress) |
-| `ALLOWED_TOPICS` | Optional. Default is products + orders. |
+| `ALLOWED_TOPICS` | Optional. Default is `products/create,products/update,orders/create,orders/cancelled,orders/fulfilled,refunds/create`. |
 
 Not needed on Cloud Run: `DIRECT_URL`, StatusPro, `CRON_SECRET`.
 
@@ -135,7 +136,9 @@ gcloud pubsub topics publish shopify-products \
 
 `X-Retry-Source=admin` is a log tag (same as Webhook DLQ Redrive). It is not required for the worker to accept the message. Topic publish IAM is the gate.
 
-Use a real product id. A fake id (`1`) is `product_not_found`: the worker 200-acks and the row stays in the Webhook DLQ (no Pub/Sub retry loop).
+Use a real product id. A fake id (`1`) is `product_not_found`: the worker 200-acks and the row stays in the Webhook DLQ (no Pub/Sub retry loop). Shopify throttle / GraphQL `errors` on the product fetch retry instead of being treated as not-found.
+
+A StatusPro inbound webhook that arrives before `orders/create` is stored on `OrderImportPending` and applied when the order is imported.
 
 Shopify CLI `webhook trigger` to `pubsub://record-loft:shopify-products` tests publish. The CLI shop has no offline session, so GraphQL will fail (`no_admin_session`, no retry); that does not mean the subscription is wrong.
 

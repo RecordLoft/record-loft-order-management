@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { prismaMock, tx, listFulfillmentOrdersForOrder, markFulfillmentOrdersInProgress } =
+const { prismaMock, tx, listFulfillmentOrdersForOrder, markFulfillmentOrdersInProgress, applyOrderImportPending } =
   vi.hoisted(() => {
     const tx = {
       customer: { upsert: vi.fn() },
@@ -17,12 +17,17 @@ const { prismaMock, tx, listFulfillmentOrdersForOrder, markFulfillmentOrdersInPr
       tx,
       listFulfillmentOrdersForOrder: vi.fn(),
       markFulfillmentOrdersInProgress: vi.fn(),
+      applyOrderImportPending: vi.fn(),
     };
   });
 
 vi.mock("../app/db.server", () => ({
   prisma: prismaMock,
   default: prismaMock,
+}));
+
+vi.mock("../app/order-import-pending.server", () => ({
+  applyOrderImportPending,
 }));
 
 vi.mock("../webhooks/shopify-fulfillment.server", () => ({
@@ -83,6 +88,7 @@ describe("handleOrdersCreate", () => {
       ok: true,
       marked: 1,
     });
+    applyOrderImportPending.mockResolvedValue(false);
   });
 
   it("retries transient GraphQL enrichment errors", async () => {
@@ -188,7 +194,7 @@ describe("handleOrdersCreate", () => {
     expect(markFulfillmentOrdersInProgress).toHaveBeenCalled();
   });
 
-  it("imports custom items without product enrichment", async () => {
+  it("imports custom items without product enrichment but still lists fulfillment orders", async () => {
     const customPayload = {
       ...payload,
       line_items: [
@@ -210,15 +216,63 @@ describe("handleOrdersCreate", () => {
       detail: "imported",
     });
     expect(tx.customer.upsert).not.toHaveBeenCalled();
+    expect(listFulfillmentOrdersForOrder).toHaveBeenCalledWith(
+      expect.any(Function),
+      "gid://shopify/Order/9001",
+    );
     expect(tx.order.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         update: expect.objectContaining({
           customerId: undefined,
-          deliveryMethod: null,
+          deliveryMethod: "shipping",
         }),
       }),
     );
-    expect(listFulfillmentOrdersForOrder).not.toHaveBeenCalled();
+  });
+
+  it("applies pending StatusPro / cancel fields after import", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: { nodes: [{ id: "gid://shopify/Product/55" }] },
+      }),
+    );
+    applyOrderImportPending.mockResolvedValue(true);
+
+    await expect(handleOrdersCreate(shop, payload, graphql)).resolves.toEqual({
+      outcome: "completed",
+      detail: "imported",
+    });
+    expect(applyOrderImportPending).toHaveBeenCalledWith(BigInt(9001));
+  });
+
+  it("stamps fulfilledAt when the create payload is already fulfilled", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: { nodes: [{ id: "gid://shopify/Product/55" }] },
+      }),
+    );
+    const fulfilledPayload = {
+      ...payload,
+      fulfillment_status: "fulfilled",
+      updated_at: "2026-08-02T12:00:00.000Z",
+    };
+
+    await expect(
+      handleOrdersCreate(shop, fulfilledPayload, graphql),
+    ).resolves.toEqual({
+      outcome: "completed",
+      detail: "imported",
+    });
+    expect(tx.order.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          fulfilledAt: new Date("2026-08-02T12:00:00.000Z"),
+        }),
+        create: expect.objectContaining({
+          fulfilledAt: new Date("2026-08-02T12:00:00.000Z"),
+        }),
+      }),
+    );
   });
 
   it("uses billing/shipping phone when the customer has none", async () => {

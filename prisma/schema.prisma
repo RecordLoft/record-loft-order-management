@@ -46,8 +46,21 @@ model Order {
   deliveryMethod String?
   ospStatusName     String?
   ospStatusSyncedAt DateTime?
+  cancelledAt    DateTime?
+  refundedAt     DateTime?
+  fulfilledAt    DateTime?
 
   @@index([shop, deliveryMethod])
+}
+
+/// Status / cancel / refund events that arrived before orders/create imported the row.
+model OrderImportPending {
+  orderId           BigInt    @id
+  cancelledAt       DateTime?
+  refundedAt        DateTime?
+  fulfilledAt       DateTime?
+  ospStatusName     String?
+  ospStatusSyncedAt DateTime?
 }
 
 model LineItem {
@@ -83,6 +96,9 @@ enum WebhookFailureStatus {
 enum WebhookFailureHandler {
   product_description_sync
   orders_create
+  orders_cancelled
+  orders_fulfilled
+  refunds_create
   ack_drop
 }
 

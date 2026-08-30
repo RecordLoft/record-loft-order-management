@@ -351,13 +351,17 @@ export type FetchedProduct = {
   metafields: ProductMetafield[];
 };
 
+export type FetchProductResult =
+  | { ok: true; product: FetchedProduct }
+  | { ok: false; code: "product_not_found" | "graphql_errors"; message: string };
+
 export async function fetchProductWithAllMetafields(
   graphql: (
     query: string,
     options?: { variables?: Record<string, unknown> },
   ) => Promise<Response>,
   productGid: string,
-): Promise<FetchedProduct | null> {
+): Promise<FetchProductResult> {
   const allMetafields: ProductMetafield[] = [];
   let cursor: string | null = null;
   let title = "";
@@ -372,8 +376,19 @@ export async function fetchProductWithAllMetafields(
       errors?: unknown;
     };
 
-    if (json.errors || !json.data?.product) {
-      return null;
+    if (json.errors) {
+      return {
+        ok: false,
+        code: "graphql_errors",
+        message: JSON.stringify(json.errors),
+      };
+    }
+    if (!json.data?.product) {
+      return {
+        ok: false,
+        code: "product_not_found",
+        message: `Product ${productGid} not found`,
+      };
     }
 
     const product = json.data.product;
@@ -391,7 +406,7 @@ export async function fetchProductWithAllMetafields(
     allMetafields,
   );
 
-  return { title, descriptionHtml, metafields };
+  return { ok: true, product: { title, descriptionHtml, metafields } };
 }
 
 export const PRODUCT_UPDATE_MUTATION = `#graphql
@@ -424,14 +439,15 @@ export async function syncProductDescription(
   productGid: string,
   options?: { dryRun?: boolean },
 ): Promise<DescriptionSyncResult> {
-  const productData = await fetchProductWithAllMetafields(graphql, productGid);
-  if (!productData) {
+  const fetched = await fetchProductWithAllMetafields(graphql, productGid);
+  if (!fetched.ok) {
     return {
       outcome: "error",
-      code: "product_not_found",
-      message: `Product ${productGid} not found or metafields could not be loaded`,
+      code: fetched.code,
+      message: fetched.message,
     };
   }
+  const productData = fetched.product;
 
   const selectedFields = selectedMetafieldsFromAll(productData.metafields);
   const nextDescription = buildProductDescriptionHtml(

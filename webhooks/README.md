@@ -11,7 +11,8 @@ Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (fai
 | `queue.server.ts` | Coalesce, claim (`processing`), run, persist / delete `WebhookFailure` |
 | `product-description.handler.server.ts` | Rebuild product `descriptionHtml` |
 | `product-description.server.ts` | Description metafield → HTML |
-| `orders-create.handler.server.ts` | Import the order, mark fulfillment in progress |
+| `orders-create.handler.server.ts` | Import the order, apply pending cancel/refund/OSP, mark fulfillment in progress |
+| `orders-lifecycle.handler.server.ts` | `orders/cancelled`, `orders/fulfilled`, and `refunds/create` (DB-only; pending if the order is not imported yet) |
 | `shopify-fulfillment.server.ts` | Fulfillment-order progress mutations |
 | `types.server.ts` | Handler result type |
 

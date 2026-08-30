@@ -66,7 +66,7 @@ describe("listFulfillmentOrdersForOrder", () => {
     });
   });
 
-  it("returns a non-retryable GraphQL error", async () => {
+  it("returns a retryable GraphQL error", async () => {
     const graphql = vi.fn(async () =>
       jsonResponse({ errors: [{ message: "Access denied" }] }),
     );
@@ -74,7 +74,7 @@ describe("listFulfillmentOrdersForOrder", () => {
       listFulfillmentOrdersForOrder(graphql, orderGid),
     ).resolves.toEqual({
       ok: false,
-      retryable: false,
+      retryable: true,
       code: "graphql_errors",
       message: JSON.stringify([{ message: "Access denied" }]),
     });
@@ -112,6 +112,18 @@ describe("markFulfillmentOrdersInProgress", () => {
           id: "gid://shopify/FulfillmentOrder/1",
           status: "CLOSED",
           supportedActions: [{ action: "CREATE_FULFILLMENT" }],
+        },
+      ]),
+    ).resolves.toEqual({ ok: true, marked: 0 });
+  });
+
+  it("treats fulfilled fulfillment orders as already done", async () => {
+    await expect(
+      markFulfillmentOrdersInProgress(vi.fn(), [
+        {
+          id: "gid://shopify/FulfillmentOrder/1",
+          status: "FULFILLED",
+          supportedActions: [],
         },
       ]),
     ).resolves.toEqual({ ok: true, marked: 0 });
@@ -158,7 +170,7 @@ describe("markFulfillmentOrdersInProgress", () => {
     );
   });
 
-  it("stops on GraphQL and user errors", async () => {
+  it("retries GraphQL errors and keeps userErrors non-retryable", async () => {
     const graphqlErrors = vi.fn(async () =>
       jsonResponse({ errors: [{ message: "Throttled" }] }),
     );
@@ -172,7 +184,7 @@ describe("markFulfillmentOrdersInProgress", () => {
       ]),
     ).resolves.toMatchObject({
       ok: false,
-      retryable: false,
+      retryable: true,
       code: "graphql_errors",
     });
 
@@ -198,6 +210,68 @@ describe("markFulfillmentOrdersInProgress", () => {
       retryable: false,
       code: "fulfillment_report_progress_failed",
       message: "not allowed",
+    });
+  });
+
+  it("attempts every eligible FO and reports partial userErrors", async () => {
+    const graphql = vi.fn(async (_query: string, options?: { variables?: { id?: string } }) => {
+      if (options?.variables?.id === "gid://shopify/FulfillmentOrder/1") {
+        return jsonResponse({
+          data: {
+            fulfillmentOrderReportProgress: {
+              fulfillmentOrder: {
+                id: "gid://shopify/FulfillmentOrder/1",
+                status: "IN_PROGRESS",
+              },
+              userErrors: [],
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          fulfillmentOrderReportProgress: {
+            userErrors: [{ message: "not allowed" }],
+          },
+        },
+      });
+    });
+
+    await expect(
+      markFulfillmentOrdersInProgress(graphql, [
+        {
+          id: "gid://shopify/FulfillmentOrder/1",
+          status: "OPEN",
+          supportedActions: [{ action: "REPORT_PROGRESS" }],
+        },
+        {
+          id: "gid://shopify/FulfillmentOrder/2",
+          status: "OPEN",
+          supportedActions: [{ action: "REPORT_PROGRESS" }],
+        },
+      ]),
+    ).resolves.toEqual({
+      ok: false,
+      retryable: false,
+      code: "fulfillment_report_progress_failed",
+      message: "not allowed; marked 1",
+    });
+    expect(graphql).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries when leftover OPEN FOs are not eligible", async () => {
+    await expect(
+      markFulfillmentOrdersInProgress(vi.fn(), [
+        {
+          id: "gid://shopify/FulfillmentOrder/1",
+          status: "OPEN",
+          supportedActions: [],
+        },
+      ]),
+    ).resolves.toMatchObject({
+      ok: false,
+      retryable: true,
+      code: "fulfillment_orders_not_ready",
     });
   });
 });

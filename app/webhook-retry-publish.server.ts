@@ -23,6 +23,9 @@ const PUBSUB_TOPIC_BY_HANDLER: Partial<
 > = {
   [WebhookFailureHandler.product_description_sync]: "shopify-products",
   [WebhookFailureHandler.orders_create]: "shopify-orders",
+  [WebhookFailureHandler.orders_cancelled]: "shopify-orders",
+  [WebhookFailureHandler.orders_fulfilled]: "shopify-orders",
+  [WebhookFailureHandler.refunds_create]: "shopify-orders",
 };
 
 type ServiceAccountJson = {

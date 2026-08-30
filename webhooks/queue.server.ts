@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   WebhookFailureHandler,
   WebhookFailureStatus,
@@ -6,6 +7,11 @@ import { prisma } from "../app/db.server";
 import type { GraphqlRequest } from "./product-description.server";
 import { unauthenticated } from "../app/shopify.server";
 import { handleOrdersCreate } from "./orders-create.handler.server";
+import {
+  handleOrdersCancelled,
+  handleOrdersFulfilled,
+  handleRefundsCreate,
+} from "./orders-lifecycle.handler.server";
 import { handleProductDescriptionSync } from "./product-description.handler.server";
 
 export const WEBHOOK_ERROR_CODES = {
@@ -79,9 +85,14 @@ async function graphqlForShop(shop: string): Promise<GraphqlRequest | null> {
   }
 }
 
+const HANDLERS_NEEDING_GRAPHQL = new Set<WebhookFailureHandler>([
+  WebhookFailureHandler.product_description_sync,
+  WebhookFailureHandler.orders_create,
+]);
+
 async function runHandler(
   work: { shop: string; handler: WebhookFailureHandler; payload: unknown },
-  graphql: GraphqlRequest,
+  graphql?: GraphqlRequest,
 ): Promise<
   | { type: "success"; outcome: "completed" | "skipped"; detail: string }
   | {
@@ -94,6 +105,14 @@ async function runHandler(
 > {
   switch (work.handler) {
     case WebhookFailureHandler.product_description_sync:
+      if (!graphql) {
+        return {
+          type: "error",
+          code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
+          message: "No offline session for shop",
+          retry: false,
+        };
+      }
       return mapHandlerResult(
         await handleProductDescriptionSync(
           work.shop,
@@ -102,8 +121,28 @@ async function runHandler(
         ),
       );
     case WebhookFailureHandler.orders_create:
+      if (!graphql) {
+        return {
+          type: "error",
+          code: WEBHOOK_ERROR_CODES.NO_ADMIN_SESSION,
+          message: "No offline session for shop",
+          retry: false,
+        };
+      }
       return mapHandlerResult(
         await handleOrdersCreate(work.shop, work.payload as never, graphql),
+      );
+    case WebhookFailureHandler.orders_cancelled:
+      return mapHandlerResult(
+        await handleOrdersCancelled(work.payload as Record<string, unknown>),
+      );
+    case WebhookFailureHandler.orders_fulfilled:
+      return mapHandlerResult(
+        await handleOrdersFulfilled(work.payload as Record<string, unknown>),
+      );
+    case WebhookFailureHandler.refunds_create:
+      return mapHandlerResult(
+        await handleRefundsCreate(work.payload as Record<string, unknown>),
       );
     case WebhookFailureHandler.ack_drop:
       return {
@@ -372,9 +411,12 @@ export async function processWebhookWork(
   input: WebhookWorkInput,
   graphql?: GraphqlRequest,
 ): Promise<ProcessWebhookWorkResult> {
-  const runGraphql = graphql ?? (await graphqlForShop(input.shop));
+  const needsGraphql = HANDLERS_NEEDING_GRAPHQL.has(input.handler);
+  const runGraphql = needsGraphql
+    ? (graphql ?? (await graphqlForShop(input.shop)))
+    : graphql;
 
-  if (!runGraphql) {
+  if (needsGraphql && !runGraphql) {
     await recordWebhookFailureNoSession(input);
     return {
       status: "failure",
@@ -385,7 +427,7 @@ export async function processWebhookWork(
   }
 
   try {
-    const result = await runHandler(input, runGraphql);
+    const result = await runHandler(input, runGraphql ?? undefined);
     if (result.type === "success") {
       await clearWebhookFailure(input);
       return {
@@ -459,6 +501,26 @@ export async function claimWebhookWork(input: WebhookWorkInput): Promise<boolean
   return result.count > 0;
 }
 
+function ackDropResourceId(input: {
+  shop?: string;
+  topic?: string;
+  reason: string;
+  webhookId?: string | null;
+  messageId?: string | null;
+}): bigint {
+  const identity =
+    input.webhookId?.trim() ||
+    input.messageId?.trim() ||
+    crypto.randomUUID();
+  const digest = createHash("sha256")
+    .update(
+      `${input.shop ?? ""}|${input.topic ?? ""}|${input.reason}|${identity}`,
+    )
+    .digest();
+  const n = digest.readBigUInt64BE(0) & 0x7fffffffffffffffn;
+  return n === 0n ? 1n : n;
+}
+
 /** Persist a message the worker 200-acks so it does not vanish from the DLQ. */
 export async function recordAckDrop(input: {
   shop?: string;
@@ -466,13 +528,16 @@ export async function recordAckDrop(input: {
   resourceId?: number | bigint;
   reason: string;
   payload?: unknown;
+  webhookId?: string | null;
+  messageId?: string | null;
 }) {
   return upsertWebhookFailure(
     {
       shop: input.shop || "_unknown",
       handler: WebhookFailureHandler.ack_drop,
       topic: input.topic || "unknown",
-      resourceId: input.resourceId ?? 0,
+      resourceId: ackDropResourceId(input),
+      webhookId: input.webhookId ?? null,
       payload: input.payload ?? { reason: input.reason },
     },
     "ack_drop",

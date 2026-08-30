@@ -1,4 +1,5 @@
 import {
+  Badge,
   BlockStack,
   Box,
   Button,
@@ -9,6 +10,7 @@ import {
   Layout,
   Link,
   Page,
+  Select,
   Text,
   TextField,
 } from "@shopify/polaris";
@@ -19,6 +21,8 @@ import {
   filterRecordPlanetOrdersForSearch,
   getRecordPlanetSearchMatch,
   parseProperties,
+  parseRecordPlanetView,
+  recordPlanetClosedLabel,
   recordPlanetOrderWhere,
   type GloboProperties,
 } from "../record-planet.server";
@@ -46,6 +50,7 @@ type SerializedOrder = {
   customerId: string | null;
   product: SerializedProduct | null;
   status: { name?: string } | string;
+  closedLabel: "Cancelled" | "Refunded" | "Fulfilled" | null;
 };
 
 type SerializedCustomer = {
@@ -161,11 +166,13 @@ function ProductDetails({ product }: { product: SerializedProduct }) {
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const searchQuery = new URL(request.url).searchParams.get("q")?.trim() ?? "";
+  const url = new URL(request.url);
+  const searchQuery = url.searchParams.get("q")?.trim() ?? "";
+  const view = parseRecordPlanetView(url.searchParams.get("view"));
 
   const [orderWhere, searchMatch] = await Promise.all([
-    recordPlanetOrderWhere(session.shop, searchQuery),
-    getRecordPlanetSearchMatch(session.shop, searchQuery),
+    recordPlanetOrderWhere(session.shop, searchQuery, view),
+    getRecordPlanetSearchMatch(session.shop, searchQuery, view),
   ]);
 
   const ordersRaw = await prisma.order.findMany({
@@ -190,6 +197,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     customerId: order.customerId?.toString() ?? null,
     product: serializeProduct(order.lineItems[0]),
     status: orderStatusFromRow(order),
+    closedLabel: recordPlanetClosedLabel(order),
   }));
 
   const customers: Record<string, SerializedCustomer> = {};
@@ -210,6 +218,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     searchQuery,
+    view,
     customerGroups,
     totalOrders,
     shop: session.shop,
@@ -217,7 +226,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export default function RecordPlanetOrders() {
-  const { searchQuery, customerGroups, totalOrders, shop } =
+  const { searchQuery, view, customerGroups, totalOrders, shop } =
     useLoaderData<typeof loader>();
 
   const revalidator = useRevalidator();
@@ -298,7 +307,8 @@ export default function RecordPlanetOrders() {
         <Layout.Section>
           <Card>
             <BlockStack gap="200">
-
+              <InlineStack gap="200" blockAlign="end" wrap>
+              <div style={{ flexGrow: 1, minWidth: "12rem" }}>
               <TextField
                 label="Search orders"
                 labelHidden
@@ -311,6 +321,29 @@ export default function RecordPlanetOrders() {
                 onClearButtonClick={() => setInputValue("")}
                 loading={isSearching}
               />
+              </div>
+              <Select
+                label="Show"
+                labelHidden
+                options={[
+                  { label: "Active", value: "active" },
+                  { label: "Cancelled, refunded & fulfilled", value: "closed" },
+                  { label: "All", value: "all" },
+                ]}
+                value={view}
+                onChange={(next) => {
+                  setSearchParams(
+                    (prev) => {
+                      const params = new URLSearchParams(prev);
+                      if (next === "active") params.delete("view");
+                      else params.set("view", next);
+                      return params;
+                    },
+                    { replace: true },
+                  );
+                }}
+              />
+              </InlineStack>
             </BlockStack>
           </Card>
         </Layout.Section>
@@ -398,6 +431,11 @@ export default function RecordPlanetOrders() {
                                             #{order.orderNumber}
                                           </Text>
                                         </Link>
+                                        {order.closedLabel ? (
+                                          <Badge tone="attention">
+                                            {order.closedLabel}
+                                          </Badge>
+                                        ) : null}
                                         <Text
                                           as="span"
                                           variant="bodySm"

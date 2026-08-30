@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import prisma from "./db.server";
+import { upsertOrderImportPending } from "./order-import-pending.server";
 
 const OSP_BASE = "https://app.orderstatuspro.com/api/v1";
 
@@ -8,10 +9,9 @@ const OSP_BASE = "https://app.orderstatuspro.com/api/v1";
  * - Most endpoints (incl. viable-statuses, single status update): 60/min
  * - POST /orders/bulk-status: 5/min (max 50 order_ids per request)
  */
-const MAX_429_RETRIES = 3;
 
 /** Below this count: POST /orders/{id}/status per order; at or above: /orders/bulk-status. */
-export const BULK_STATUS_ORDER_THRESHOLD = 40;
+export const BULK_STATUS_ORDER_THRESHOLD = 5;
 
 type RateLimitBucket = "standard" | "bulk";
 
@@ -63,28 +63,21 @@ function getApiKey(): string {
   return apiKey;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/** Claim a client-side slot or throw immediately — do not sleep in Netlify. */
+function claimRateLimitSlot(bucket: RateLimitBucket): void {
+  const { max, label } = RATE_LIMITS[bucket];
+  pruneRequestWindow(bucket);
 
-/** Returns total ms spent waiting for a rate-limit slot. */
-async function waitForRateLimitSlot(bucket: RateLimitBucket): Promise<number> {
-  const { max, windowMs, label } = RATE_LIMITS[bucket];
-  const timestamps = requestTimestampsByBucket[bucket];
-  const now = Date.now();
-  pruneRequestWindow(bucket, now);
-
-  if (timestamps.length >= max) {
-    const waitMs = windowMs - (now - timestamps[0]!) + 50;
+  if (requestTimestampsByBucket[bucket].length >= max) {
     console.warn(
-      `${LOG_PREFIX} client throttle (${label}): ${timestamps.length}/${max} in ${windowMs}ms, waiting ${waitMs}ms`,
+      `${LOG_PREFIX} client throttle (${label}): ${requestTimestampsByBucket[bucket].length}/${max}`,
     );
-    await sleep(waitMs);
-    return waitMs + (await waitForRateLimitSlot(bucket));
+    throw new RateLimitError(
+      `Order Status Pro ${label} rate limit reached. Wait a moment and try again.`,
+    );
   }
 
-  timestamps.push(Date.now());
-  return 0;
+  requestTimestampsByBucket[bucket].push(Date.now());
 }
 
 export type StatusChoice = { label: string; value: string };
@@ -210,14 +203,21 @@ export async function applyOrderStatusCache(
   orderId: bigint,
   statusName: string,
 ): Promise<boolean> {
+  const syncedAt = new Date();
   const result = await prisma.order.updateMany({
     where: { id: orderId },
     data: {
       ospStatusName: statusName,
-      ospStatusSyncedAt: new Date(),
+      ospStatusSyncedAt: syncedAt,
     },
   });
-  return result.count > 0;
+  if (result.count > 0) return true;
+
+  await upsertOrderImportPending(orderId, {
+    ospStatusName: statusName,
+    ospStatusSyncedAt: syncedAt,
+  });
+  return false;
 }
 
 export function parseOspWebhookPayload(
@@ -268,30 +268,6 @@ export function verifyOspWebhookToken(urlToken: string | undefined): boolean {
   return safeEqual(urlToken.trim(), expected);
 }
 
-function parseRetryAfterMs(response: Response): number | null {
-  const header = response.headers.get("Retry-After");
-  if (!header?.trim()) return null;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.ceil(seconds * 1000);
-  }
-  const retryAt = Date.parse(header);
-  if (!Number.isNaN(retryAt)) {
-    return Math.max(0, retryAt - Date.now());
-  }
-  return null;
-}
-
-function backoffMsFor429(bucket: RateLimitBucket, attempt: number): number {
-  if (bucket === "bulk") {
-    // 5/min → ~12s between bulk calls when the minute window is full.
-    const delays = [12_000, 15_000, 15_000];
-    return delays[attempt] ?? 15_000;
-  }
-  const delays = [2_000, 4_000, 4_000];
-  return delays[attempt] ?? 4_000;
-}
-
 async function throwIfOrderStatusProError(
   response: Response,
   fallbackMessage: string,
@@ -338,11 +314,11 @@ export async function fetchOrderStatusPro(
   const method = (init?.method ?? "GET").toUpperCase();
   const bucket = rateLimitBucket(path, method);
   const { max, label } = RATE_LIMITS[bucket];
-  const waitedMs = await waitForRateLimitSlot(bucket);
+  claimRateLimitSlot(bucket);
   const windowCount = getWindowRequestCount(bucket);
 
   console.log(
-    `${LOG_PREFIX} request ${method} ${path} ${label} window=${windowCount}/${max}${waitedMs > 0 ? ` waited=${waitedMs}ms` : ""}`,
+    `${LOG_PREFIX} request ${method} ${path} ${label} window=${windowCount}/${max}`,
   );
 
   const requestInit: RequestInit = {
@@ -354,31 +330,16 @@ export async function fetchOrderStatusPro(
     },
   };
 
-  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
-    const startedAt = Date.now();
-    const response = await fetch(`${OSP_BASE}${path}`, requestInit);
-    const elapsedMs = Date.now() - startedAt;
-    const retrySuffix =
-      attempt > 0 ? ` retry=${attempt}/${MAX_429_RETRIES}` : "";
+  const startedAt = Date.now();
+  const response = await fetch(`${OSP_BASE}${path}`, requestInit);
+  const elapsedMs = Date.now() - startedAt;
+  logOrderStatusProResponse(method, path, response, elapsedMs);
 
-    if (response.status !== 429 || attempt === MAX_429_RETRIES) {
-      logOrderStatusProResponse(method, path, response, elapsedMs, retrySuffix);
-      return response;
-    }
-
-    const retryAfterMs = parseRetryAfterMs(response);
-    const waitMs = retryAfterMs ?? backoffMsFor429(bucket, attempt);
-    logOrderStatusProResponse(
-      method,
-      path,
-      response,
-      elapsedMs,
-      `${retrySuffix} retrying in ${waitMs}ms`,
-    );
-    await sleep(waitMs);
+  if (response.status === 429) {
+    throw new RateLimitError("Order Status Pro rate limit reached. Wait a moment and try again.");
   }
 
-  throw new Error("fetchOrderStatusPro: exhausted 429 retries");
+  return response;
 }
 
 async function updateOrderStatusPerOrder(
@@ -414,8 +375,8 @@ async function updateOrderStatusBulk(
 
 /**
  * Update status for one or more orders.
- * Fewer than 40: per-order API (60/min). 40+: bulk queue (5/min).
- * All calls use fetchOrderStatusPro (client throttle + 429 retries).
+ * Fewer than 5: per-order API (60/min). 5+: bulk queue (5/min).
+ * Fail-fast on client or OSP rate limits (no sleeping in Netlify).
  */
 export async function bulkUpdateOrderStatus(
   orderIds: bigint[],

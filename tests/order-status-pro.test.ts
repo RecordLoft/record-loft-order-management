@@ -8,6 +8,9 @@ const { prismaMock, authenticateAdmin } = vi.hoisted(() => ({
       updateMany: vi.fn(),
       count: vi.fn(),
     },
+    orderImportPending: {
+      upsert: vi.fn(),
+    },
   },
   authenticateAdmin: vi.fn(),
 }));
@@ -140,6 +143,21 @@ describe("StatusPro parsers and cache", () => {
       data: expect.objectContaining({ ospStatusName: "Ready" }),
     });
   });
+
+  it("stores StatusPro status as pending when the order is not imported yet", async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.orderImportPending.upsert.mockResolvedValue({});
+    await expect(applyOrderStatusCache(5n, "Ready")).resolves.toBe(false);
+    expect(prismaMock.orderImportPending.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { orderId: 5n },
+        create: expect.objectContaining({
+          orderId: 5n,
+          ospStatusName: "Ready",
+        }),
+      }),
+    );
+  });
 });
 
 describe("StatusPro HTTP client", () => {
@@ -201,18 +219,14 @@ describe("StatusPro HTTP client", () => {
     });
   });
 
-  it("retries 429s then succeeds", async () => {
-    vi.useFakeTimers();
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(
-        jsonResponse({ message: "slow down" }, 429, { "Retry-After": "0" }),
-      )
-      .mockResolvedValueOnce(jsonResponse([{ name: "Ready", code: "ready" }]));
-
-    const pending = fetchViableStatusChoices(1n);
-    await vi.runAllTimersAsync();
-    await expect(pending).resolves.toEqual([{ label: "Ready", value: "ready" }]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+  it("throws RateLimitError on OSP 429 without retrying", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      jsonResponse({ message: "slow down" }, 429, { "Retry-After": "12" }),
+    );
+    await expect(fetchViableStatusChoices(1n)).rejects.toBeInstanceOf(
+      RateLimitError,
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("throws RateLimitError when the API reports too many attempts", async () => {

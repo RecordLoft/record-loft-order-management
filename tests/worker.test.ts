@@ -87,6 +87,9 @@ describe("allowedTopicsFromEnv", () => {
       "products/create",
       "products/update",
       "orders/create",
+      "orders/cancelled",
+      "orders/fulfilled",
+      "refunds/create",
     ]);
     expect(allowedTopicsFromEnv("orders/create")).toEqual(
       new Set(["orders/create"]),
@@ -114,6 +117,15 @@ describe("handlePush", () => {
     expect(invalid.body).toEqual({ status: "ignored", reason: "invalid json" });
     expect(recordAckDrop).toHaveBeenCalledWith(
       expect.objectContaining({ reason: "invalid json" }),
+    );
+
+    const oversized = mockRes();
+    const huge = "x".repeat(2_000_001);
+    await handlePush(requestFrom(huge) as never, oversized as never);
+    expect(oversized.statusCode).toBe(200);
+    expect(oversized.body).toEqual({ status: "ignored", reason: "body too large" });
+    expect(recordAckDrop).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "body too large" }),
     );
 
     const unknown = mockRes();
