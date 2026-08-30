@@ -1,6 +1,6 @@
 # Webhooks
 
-Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinations requires `shopify app deploy`.
+Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinations requires `shopify app deploy`. Worker code lives in `webhooks/`. Deploy is [docs/deploy-webhooks.md](deploy-webhooks.md).
 
 ## What goes where
 
@@ -35,13 +35,40 @@ A successful product description write can fire another `products/update`. Coale
 
 ## Failure handling
 
-Rows in `WebhookFailure`: pending / processing / failed. Success deletes the row. Merchants retry from **App → Webhook status** (`/app/webhooks`).
+Rows in `WebhookFailure`: pending / processing / failed. Success deletes the row. Merchants retry from **App → Webhook status** (`/app/webhooks-admin`). Retry publishes the stored payload back to Pub/Sub; Cloud Run runs the handler. Netlify does not process webhook work.
+
+Netlify needs `GCP_PUBSUB_SA_JSON` (publish-only service account) to retry. Local `shopify app dev` can use `gcloud` application-default credentials instead.
+
+```bash
+PROJECT_ID=record-loft
+SA=netlify-pubsub-publisher@${PROJECT_ID}.iam.gserviceaccount.com
+
+gcloud iam service-accounts create netlify-pubsub-publisher \
+  --project="$PROJECT_ID" \
+  --display-name="Netlify webhook retry publisher"
+
+gcloud pubsub topics add-iam-policy-binding shopify-products \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SA}" \
+  --role=roles/pubsub.publisher
+
+gcloud pubsub topics add-iam-policy-binding shopify-orders \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SA}" \
+  --role=roles/pubsub.publisher
+
+gcloud iam service-accounts keys create /tmp/netlify-pubsub-publisher.json \
+  --iam-account="$SA" \
+  --project="$PROJECT_ID"
+```
+
+Paste the JSON file contents into Netlify as `GCP_PUBSUB_SA_JSON`. Do not commit the key.
 
 Pub/Sub retries on HTTP 500 (handler error, no offline session). Poison / unknown topic returns 200 so the message is dropped.
 
 ## Environment
 
-**Netlify** (app): `DATABASE_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, StatusPro + `CRON_SECRET` as used today.
+**Netlify** (app): `DATABASE_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, StatusPro + `CRON_SECRET` as used today, plus `GCP_PUBSUB_SA_JSON` so admin retry can publish.
 
 **Cloud Run** (worker):
 

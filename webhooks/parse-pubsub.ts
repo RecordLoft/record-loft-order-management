@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { WebhookWorkInput } from "../app/webhook-queue.server";
 import { WebhookFailureHandler } from "../generated/prisma/client";
+import type { WebhookWorkInput } from "./queue.server";
 
 export type PubSubPushEnvelope = {
   message?: {

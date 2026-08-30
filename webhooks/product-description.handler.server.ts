@@ -2,7 +2,7 @@ import {
   syncProductDescription,
   type DescriptionSyncResult,
   type GraphqlRequest,
-} from "../product-description.server";
+} from "./product-description.server";
 import type { WebhookHandlerResult } from "./types.server";
 
 type ProductWebhookPayload = {

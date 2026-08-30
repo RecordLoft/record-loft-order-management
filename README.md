@@ -13,7 +13,8 @@ Embedded Shopify app for Record Loft. Merchants use it inside admin for Record P
 
 - [How the app is structured](docs/structure.md)
 - [Webhooks and Pub/Sub](docs/webhooks.md)
-- [Cloud Run worker](worker/README.md)
+- [Deploy the Cloud Run worker](docs/deploy-webhooks.md)
+- [Webhook code](webhooks/README.md)
 
 ## Local development
 
@@ -28,7 +29,7 @@ Needs `.env` with `DATABASE_URL` (Aiven) and the Shopify app client id/secret (`
 ## Production deploys
 
 1. **Netlify** — git push builds the React Router app (`@netlify/vite-plugin-react-router`).
-2. **Cloud Run worker** — build `Dockerfile.worker`, deploy image `shopify-webhooks`. See [worker/README.md](worker/README.md).
+2. **Cloud Run worker** — GitHub Action `Deploy webhooks` builds `Dockerfile.worker` and deploys `shopify-webhooks`. See [docs/deploy-webhooks.md](docs/deploy-webhooks.md).
 3. **Shopify app version** — `shopify app deploy` syncs `shopify.app.toml` (webhook URIs, scopes, extensions). Required when webhook destinations change.
 
 Do not deploy the root `Dockerfile` to Cloud Run. That image is the unused full-app template, not the worker.

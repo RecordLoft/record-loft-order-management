@@ -26,11 +26,8 @@ import type {
 } from "../../generated/prisma/client";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
-import {
-  listWebhookFailures,
-  retryWebhookFailure,
-  retryWebhookFailuresForShop,
-} from "../webhook-queue.server";
+import { republishWebhookFailures } from "../webhook-retry-publish.server";
+import { listWebhookFailures } from "../../webhooks/queue.server";
 
 const JOB_STATUSES = [
   "pending",
@@ -132,34 +129,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
 
-  if (intent === "retry") {
-    const id = String(form.get("id") ?? "");
-    const job = await retryWebhookFailure(id, { shop: session.shop });
-    if (!job) {
-      return { ok: false, message: "Job not found or already processing." };
-    }
-    if (job.outcome === "failure") {
+  try {
+    if (intent === "retry") {
+      const id = String(form.get("id") ?? "");
+      const { queued } = await republishWebhookFailures(session.shop, {
+        ids: [id],
+      });
+      if (queued === 0) {
+        return { ok: false, message: "Job not found or already processing." };
+      }
       return {
-        ok: false,
-        message: `Retry failed (${job.code}): ${job.message}`,
+        ok: true,
+        message: "Queued for Cloud Run. Refresh in a few seconds.",
       };
     }
-    return {
-      ok: true,
-      message: `Job ${job.outcome}${job.detail ? `: ${job.detail}` : ""}`,
-    };
-  }
 
-  if (intent === "retry_all") {
-    const { processed, jobs } = await retryWebhookFailuresForShop(session.shop);
-    if (processed === 0) {
-      return { ok: true, message: "Nothing to retry." };
+    if (intent === "retry_all") {
+      const { queued } = await republishWebhookFailures(session.shop);
+      if (queued === 0) {
+        return { ok: true, message: "Nothing to retry." };
+      }
+      return {
+        ok: true,
+        message: `Queued ${queued} ${queued === 1 ? "job" : "jobs"} for Cloud Run.`,
+      };
     }
-    const failed = jobs.filter((job) => job.outcome === "failure").length;
-    return {
-      ok: failed === 0,
-      message: `Retried ${processed}: ${processed - failed} succeeded, ${failed} failed.`,
-    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message };
   }
 
   return { ok: false, message: "Unknown action." };

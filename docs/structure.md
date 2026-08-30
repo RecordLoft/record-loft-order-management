@@ -5,22 +5,18 @@ Custom app on the Shopify React Router template. Runtime is split: Netlify serve
 ```
 app/                    React Router app (Netlify)
   routes/               Pages and HTTPS endpoints
-  webhooks/             Handler functions (shared with Cloud Run)
-  webhook-queue.server.ts
   shopify.server.ts     shopifyApp(), sessions, unauthenticated.admin
   db.server.ts          Prisma + Aiven (pool max 1)
-  product-description.server.ts
-  shopify-fulfillment.server.ts
   record-planet.server.ts
   order-status-pro.server.ts
-worker/                 Cloud Run entry (plain node:http, not React Router)
+webhooks/               Cloud Run worker, queue, handlers
+.github/workflows/      Deploy webhooks to Cloud Run
 netlify/functions/      warm-app (health), db-ping
 prisma/                 Schema + migrations
 extensions/             Admin action extensions (Shopify-hosted)
 certs/aiven-ca.pem      TLS CA for Aiven
 shopify.app.toml        App URL, scopes, webhook destinations
 Dockerfile.worker       Image for Cloud Run
-cloudbuild.worker.yaml  Cloud Build when local gcloud has no --dockerfile
 ```
 
 ## Netlify routes
@@ -29,7 +25,7 @@ cloudbuild.worker.yaml  Cloud Build when local gcloud has no --dockerfile
 |---|---|
 | `/app` | Embedded shell + nav (Record Planet, Webhook status) |
 | `/app/record-planet` | Record Planet orders, search, status updates |
-| `/app/webhooks` | List / retry `WebhookFailure` rows |
+| `/app/webhooks-admin` | List / retry `WebhookFailure` rows |
 | `/auth/*` | OAuth |
 | `/api/health` | Keep-warm target |
 | `/api/update-status`, `/api/viable-statuses`, `/api/order-status-sync` | StatusPro + fulfillment from the UI |
@@ -40,16 +36,16 @@ cloudbuild.worker.yaml  Cloud Build when local gcloud has no --dockerfile
 
 There are **no** `/api/webhooks/products` or `/api/webhooks/orders` routes. Those topics go to Pub/Sub.
 
-## Shared job code
+## Webhook code (`webhooks/`)
 
-`app/webhooks/*.handler.server.ts` is the business logic:
+See [webhooks/README.md](../webhooks/README.md).
 
-- **Product** — rebuild `descriptionHtml` from metafields (`product-description.server.ts`).
+- **Product** — rebuild `descriptionHtml` from metafields.
 - **Order create** — persist the order, mark fulfillment in progress when applicable.
 
-`webhook-queue.server.ts` coalesces work on `(shop, handler, resourceId)`, runs the handler via `unauthenticated.admin(shop)`, deletes the row on success, keeps it on failure for `/app/webhooks`.
+`queue.server.ts` coalesces work on `(shop, handler, resourceId)`, runs the handler via `unauthenticated.admin(shop)`, deletes the row on success, keeps it on failure for `/app/webhooks-admin`.
 
-Cloud Run imports those modules. It does not start Vite or React Router. The Docker image still `yarn install`s the root `package.json` (large, simple).
+Cloud Run starts `webhooks/worker.server.ts` (plain `node:http`). It does not start Vite or React Router. The image still copies `app/` so the worker can load Prisma and the offline session.
 
 ## Extensions
 

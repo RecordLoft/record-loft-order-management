@@ -2,11 +2,11 @@ import {
   WebhookFailureHandler,
   WebhookFailureStatus,
 } from "../generated/prisma/client";
-import { prisma } from "./db.server";
+import { prisma } from "../app/db.server";
 import type { GraphqlRequest } from "./product-description.server";
-import { unauthenticated } from "./shopify.server";
-import { handleOrdersCreate } from "./webhooks/orders-create.handler.server";
-import { handleProductDescriptionSync } from "./webhooks/product-description.handler.server";
+import { unauthenticated } from "../app/shopify.server";
+import { handleOrdersCreate } from "./orders-create.handler.server";
+import { handleProductDescriptionSync } from "./product-description.handler.server";
 
 const STALE_PROCESSING_MS = 10 * 60 * 1000;
 /** Max jobs per admin / CLI retry sweep. */

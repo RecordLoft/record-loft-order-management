@@ -20,7 +20,7 @@ api_version = "2026-07"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
-  # Do not `shopify app deploy` until Cloud Run is subscribed to these topics.
+  # Catalog / order events go to Pub/Sub. Cloud Run shopify-webhooks consumes them.
   [[webhooks.subscriptions]]
   uri = "pubsub://record-loft:shopify-orders"
   topics = [ "orders/create" ]

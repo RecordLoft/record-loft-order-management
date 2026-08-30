@@ -1,9 +1,9 @@
-import { prisma } from "../db.server";
-import type { GraphqlRequest } from "../product-description.server";
+import { prisma } from "../app/db.server";
+import type { GraphqlRequest } from "./product-description.server";
 import {
   markFulfillmentOrdersInProgress,
   type FulfillmentOrderForProgress,
-} from "../shopify-fulfillment.server";
+} from "./shopify-fulfillment.server";
 
 type OrderWebhookPayload = {
   id: number;

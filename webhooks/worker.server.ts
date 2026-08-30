@@ -1,33 +1,14 @@
 /**
- * Cloud Run Pub/Sub push worker.
- *
- * Deploy from the repo root (do not use the root Dockerfile — that is the
- * unused full-app image):
- *
- *   gcloud run deploy shopify-webhooks \
- *     --region=us-central1 \
- *     --source=. \
- *     --dockerfile=Dockerfile.worker \
- *     --no-allow-unauthenticated \
- *     --concurrency=1 \
- *     --max-instances=2 \
- *     --timeout=60 \
- *     --set-env-vars=SHOPIFY_APP_URL=https://record-loft-order-management.netlify.app
- *
- * Then create push subscriptions to https://SERVICE_URL/ and grant the push
- * service account Cloud Run Invoker. Do not switch shopify.app.toml until
- * a test message has been processed.
+ * Cloud Run Pub/Sub push worker. Deploy via .github/workflows/deploy-webhooks.yml.
+ * Manual fallback: docs/deploy-webhooks.md
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import {
-  processWebhookWork,
-  tryEnqueueWebhookWork,
-} from "../app/webhook-queue.server";
 import {
   parsePubSubPush,
   verifyShopifyHmac,
   type PubSubPushEnvelope,
 } from "./parse-pubsub";
+import { processWebhookWork, tryEnqueueWebhookWork } from "./queue.server";
 
 const PORT = Number(process.env.PORT || 8080);
 const ALLOWED_TOPICS = new Set(
