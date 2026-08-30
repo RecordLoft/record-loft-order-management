@@ -36,7 +36,7 @@ function pgPoolConfig() {
     // pg defaults to 10s, which drops the socket between webhook bursts and
     // makes the next request pay a fresh TCP + TLS handshake.
     idleTimeoutMillis: 300_000,
-    connectionTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 20_000,
   };
 }
 

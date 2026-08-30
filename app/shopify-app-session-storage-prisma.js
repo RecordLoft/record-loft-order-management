@@ -6,8 +6,8 @@ class PrismaSessionStorage {
   prisma;
   ready;
   tableName = "session";
-  connectionRetries = 2;
-  connectionRetryIntervalMs = 5000;
+  connectionRetries = 4;
+  connectionRetryIntervalMs = 3000;
   constructor(
     prisma,
     { tableName, connectionRetries, connectionRetryIntervalMs } = {},
@@ -25,17 +25,15 @@ class PrismaSessionStorage {
     if (this.getSessionTable() === undefined) {
       throw new Error(`PrismaClient does not have a ${this.tableName} table`);
     }
-    console.log(
-      "Available Prisma Models:",
-      Object.keys(this.prisma).filter((k) => !k.startsWith("$")),
-    );
+    // Do not throw here — an unhandled rejection kills the Cloud Run process.
+    // Aiven timeouts are transient; requests retry via ensureReady().
     this.ready = this.pollForTable()
       .then(() => true)
-      .catch((cause) => {
-        throw new MissingSessionTableError(
-          `Prisma ${this.tableName} table does not exist. This could happen for a few reasons, see https://github.com/Shopify/shopify-app-js/tree/main/packages/apps/session-storage/shopify-app-session-storage-prisma#troubleshooting for more information`,
-          cause,
+      .catch((error) => {
+        console.error(
+          `[session-storage] initial ${this.tableName} probe failed: ${error}`,
         );
+        return false;
       });
   }
   async storeSession(session) {
@@ -109,24 +107,32 @@ class PrismaSessionStorage {
     return this.ready;
   }
   async ensureReady() {
-    if (!(await this.ready))
+    if (await this.ready) return;
+    try {
+      await this.pollForTable();
+      this.ready = Promise.resolve(true);
+    } catch (error) {
+      console.error(`[session-storage] ${this.tableName} still unreachable: ${error}`);
       throw new MissingSessionStorageError(
-        "Prisma session storage is not ready. Use the `isReady` method to poll for the table.",
+        "Prisma session storage is not ready. The database did not accept a connection in time.",
       );
+    }
   }
   async pollForTable() {
+    let lastError = null;
     for (let i = 0; i < this.connectionRetries; i++) {
       try {
         await this.getSessionTable().count();
         return;
       } catch (error) {
-        console.log(`Error obtaining session table: ${error}`);
+        lastError = error;
+        console.error(
+          `[session-storage] session count failed (attempt ${i + 1}/${this.connectionRetries}): ${error}`,
+        );
       }
       await sleep(this.connectionRetryIntervalMs);
     }
-    throw Error(
-      `The table \`${this.tableName}\` does not exist in the current database.`,
-    );
+    throw lastError ?? new Error(`Could not query \`${this.tableName}\``);
   }
   sessionToRow(session) {
     const sessionParams = session.toObject();
