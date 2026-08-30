@@ -223,7 +223,7 @@ export async function redriveSkipReason(
     row.status === WebhookFailureStatus.processing &&
     !isProcessingLeaseExpired(row.lastAttemptAt)
   ) {
-    return "Still processing. Wait a few minutes after the lease expires.";
+    return "Still processing. Wait until the 90s lease expires.";
   }
   if (row.status === WebhookFailureStatus.pending) {
     return "Already queued for retry.";

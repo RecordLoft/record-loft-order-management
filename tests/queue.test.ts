@@ -61,6 +61,7 @@ import {
   WEBHOOK_ERROR_CODES,
   claimWebhookWork,
   enqueueWebhookWork,
+  releaseWebhookWork,
   isProcessingLeaseExpired,
   listWebhookFailures,
   processWebhookWork,
@@ -84,6 +85,10 @@ describe("processing lease", () => {
   it("treats a missing lastAttemptAt as expired", () => {
     expect(isProcessingLeaseExpired(null)).toBe(true);
     expect(isProcessingLeaseExpired(undefined)).toBe(true);
+  });
+
+  it("is 90 seconds to sit just above the 60s Cloud Run timeout", () => {
+    expect(PROCESSING_LEASE_MS).toBe(90_000);
   });
 
   it("expires after PROCESSING_LEASE_MS", () => {
@@ -128,6 +133,26 @@ describe("claimWebhookWork", () => {
   it("returns false when another instance holds a live lease", async () => {
     prismaMock.webhookFailure.updateMany.mockResolvedValue({ count: 0 });
     await expect(claimWebhookWork(work)).resolves.toBe(false);
+  });
+});
+
+describe("releaseWebhookWork", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns a processing row to pending", async () => {
+    prismaMock.webhookFailure.updateMany.mockResolvedValue({ count: 1 });
+    await expect(releaseWebhookWork(work)).resolves.toBe(true);
+    expect(prismaMock.webhookFailure.updateMany).toHaveBeenCalledWith({
+      where: {
+        shop: work.shop,
+        handler: work.handler,
+        resourceId: BigInt(42),
+        status: WebhookFailureStatus.processing,
+      },
+      data: { status: WebhookFailureStatus.pending },
+    });
   });
 });
 

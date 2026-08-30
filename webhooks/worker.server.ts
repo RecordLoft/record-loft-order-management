@@ -18,7 +18,9 @@ import {
   claimWebhookWork,
   processWebhookWork,
   recordAckDrop,
+  releaseWebhookWork,
   tryEnqueueWebhookWork,
+  type WebhookWorkInput,
 } from "./queue.server";
 
 const PORT = Number(process.env.PORT || 8080);
@@ -37,6 +39,7 @@ export function allowedTopicsFromEnv(
 export const workerState = {
   shuttingDown: false,
   inFlight: 0,
+  claimedWork: null as WebhookWorkInput | null,
 };
 
 export const MAX_PUSH_BODY_BYTES = 2_000_000;
@@ -77,12 +80,37 @@ function send(res: ServerResponse, status: number, body: unknown) {
 async function persistAckDrop(
   envelope: PubSubPushEnvelope,
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   const context = ackDropContext(envelope);
   try {
     await recordAckDrop({ ...context, reason });
+    return true;
   } catch (error) {
     console.error(`[pubsub-worker] ack-drop persist failed reason=${reason}`, error);
+    return false;
+  }
+}
+
+function sendAckDrop(
+  res: ServerResponse,
+  reason: string,
+  persisted: boolean,
+) {
+  if (!persisted) {
+    send(res, 500, { status: "ack_drop_persist_failed", reason });
+    return;
+  }
+  send(res, 200, { status: "ignored", reason });
+}
+
+export async function releaseClaimedWork(): Promise<void> {
+  const work = workerState.claimedWork;
+  if (!work) return;
+  workerState.claimedWork = null;
+  try {
+    await releaseWebhookWork(work);
+  } catch (error) {
+    console.error("[pubsub-worker] release claimed work failed", error);
   }
 }
 
@@ -94,16 +122,18 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
     const reason =
       error instanceof BodyTooLargeError ? "body too large" : "invalid json";
     console.warn(`[pubsub-worker] ack-drop reason=${reason}`);
-    await persistAckDrop({}, reason);
-    send(res, 200, { status: "ignored", reason });
+    sendAckDrop(res, reason, await persistAckDrop({}, reason));
     return;
   }
 
   const parsed = parsePubSubPush(envelope ?? {});
   if (!parsed.ok) {
     console.warn(`[pubsub-worker] ack-drop reason=${parsed.reason}`);
-    await persistAckDrop(envelope ?? {}, parsed.reason);
-    send(res, 200, { status: "ignored", reason: parsed.reason });
+    sendAckDrop(
+      res,
+      parsed.reason,
+      await persistAckDrop(envelope ?? {}, parsed.reason),
+    );
     return;
   }
 
@@ -116,8 +146,7 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
     console.log(
       `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId} source=${source}`,
     );
-    await persistAckDrop(envelope, reason);
-    send(res, 200, { status: "ignored", reason });
+    sendAckDrop(res, reason, await persistAckDrop(envelope, reason));
     return;
   }
 
@@ -143,7 +172,15 @@ export async function handlePush(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const result = await processWebhookWork(work);
+  workerState.claimedWork = work;
+  let result: Awaited<ReturnType<typeof processWebhookWork>>;
+  try {
+    result = await processWebhookWork(work);
+  } finally {
+    if (workerState.claimedWork === work) {
+      workerState.claimedWork = null;
+    }
+  }
   const latencyMs = Date.now() - started;
 
   if (result.status === "success") {
@@ -244,6 +281,7 @@ export function startWorker() {
   process.on("SIGTERM", () => {
     console.log("[pubsub-worker] SIGTERM, draining");
     workerState.shuttingDown = true;
+    void releaseClaimedWork();
     server.close(() => {
       drainAndExit();
     });

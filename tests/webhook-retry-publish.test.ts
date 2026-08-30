@@ -70,7 +70,7 @@ describe("redriveSkipReason", () => {
       handler: WebhookFailureHandler.orders_create,
     });
     await expect(redriveSkipReason(shop, "live")).resolves.toBe(
-      "Still processing. Wait a few minutes after the lease expires.",
+      "Still processing. Wait until the 90s lease expires.",
     );
 
     prismaMock.webhookFailure.findFirst.mockResolvedValue({

@@ -31,7 +31,7 @@ Behavior changes must update **docs and tests in the same change**. Read this fi
 | Path | Role |
 |---|---|
 | `/app` | Embedded shell + nav (Record Planet, Webhook DLQ) |
-| `/app/record-planet` | Record Planet orders, search, Active/Closed (cancelled, refunded, or fulfilled)/All view, status updates |
+| `/app/record-planet` | Record Planet orders, search, Active/Closed (cancelled, fully refunded, or fulfilled)/All view, status updates |
 | `/app/webhooks-admin` | Dead-letter queue for `WebhookFailure` (Redrive) |
 | `/auth/*` | OAuth |
 | `/api/health` | Keep-warm target (`CRON_SECRET`) |
@@ -49,14 +49,14 @@ See [webhooks/README.md](../webhooks/README.md).
 
 - **Product** — rebuild `descriptionHtml` from metafields. GraphQL errors retry; `product_not_found` is terminal.
 - **Order create** — persist the order (including custom line items with no `product_id`), apply any `OrderImportPending` cancel/refund/fulfill/OSP fields, mark fulfillment in progress when applicable. Fulfillment orders are paginated (50 per page). List/`REPORT_PROGRESS` GraphQL errors retry; leftover OPEN orders are not a silent success. Already-done FO statuses include FULFILLED, CLOSED, IN_PROGRESS, and CANCELLED (case-insensitive). If the create payload is already `fulfillment_status: fulfilled`, `fulfilledAt` is set on import.
-- **Order cancelled / refund created / fulfilled** — set `cancelledAt` / `refundedAt` (any refund) / `fulfilledAt` (fully fulfilled). DB-only; no Admin session required. If the order is not imported yet, the flags land on `OrderImportPending`.
+- **Order cancelled / refund created / fulfilled** — set `cancelledAt` / `refundedAt` (full refund only) / `fulfilledAt` (fully fulfilled). A partial refund does not set `refundedAt`, so the order stays Active. Full refund is `financial_status: refunded` or refund line quantities covering every imported line item (or every line in the payload before import). DB-only; no Admin session required. If the order is not imported yet, the flags land on `OrderImportPending`.
 - **StatusPro** — fail-fast on client or OSP 429 (no sleep in Netlify). Bulk updates start at 5 orders.
 
-`queue.server.ts` coalesces work on `(shop, handler, resourceId)`, claims the row (`processing`, lease on `lastAttemptAt`), then runs the handler. Product and orders-create use `unauthenticated.admin(shop)`; cancel/refund/fulfill do not. A `processing` row older than 3 minutes can be claimed again or redriven. Success deletes the row. Failure increments `attempts`; after 5 failures, no session (product/create only), or a terminal error (`product_not_found`, non-retryable GraphQL `userErrors`) the row is `failed` and Pub/Sub is acked. Invalid / unknown messages are stored as `ack_drop` (still HTTP 200), each with a unique `resourceId` so distinct poison messages do not overwrite each other. `/app/webhooks-admin` is the DLQ; Redrive republishes via `app/webhook-retry-publish.server.ts` (not `ack_drop` rows; stale processing is allowed). Netlify does not run handlers.
+`queue.server.ts` coalesces work on `(shop, handler, resourceId)`, claims the row (`processing`, lease on `lastAttemptAt`), then runs the handler. Product and orders-create use `unauthenticated.admin(shop)`; cancel/refund/fulfill do not. A `processing` row older than 90 seconds can be claimed again or redriven. Success deletes the row. Failure increments `attempts`; after 5 failures, no session (product/create only), or a terminal error (`product_not_found`, non-retryable GraphQL `userErrors`) the row is `failed` and Pub/Sub is acked. Invalid / unknown messages are stored as `ack_drop` (HTTP 200 once persisted), each with a unique `resourceId` so distinct poison messages do not overwrite each other. If ack-drop persist fails, the worker returns 500 so Pub/Sub retries. SIGTERM releases the claimed row back to `pending`. `/app/webhooks-admin` is the DLQ; Redrive republishes via `app/webhook-retry-publish.server.ts` (not `ack_drop` rows; stale processing is allowed). Netlify does not run handlers.
 
-Cloud Run starts `webhooks/worker.server.ts` (plain `node:http`). `GET /` is liveness; `GET /health` pings Postgres. SIGTERM drains in-flight pushes (capped at 50s) before `closeDb()`. Push bodies over 2MB are ack-dropped. The image still copies `app/` so the worker can load Prisma and the offline session.
+Cloud Run starts `webhooks/worker.server.ts` (plain `node:http`). `GET /` is liveness; `GET /health` pings Postgres. SIGTERM releases the claimed row and drains in-flight pushes (capped at 50s) before `closeDb()`. Push bodies over 2MB are ack-dropped after persist. The image still copies `app/` so the worker can load Prisma and the offline session.
 
-Record Planet queries filter by `session.shop` and default to **Active** (not cancelled, refunded, or fulfilled). `?view=closed` or `?view=all` includes those orders; search uses the same view. `shopifyApp()` uses `AppDistribution.SingleMerchant`.
+Record Planet queries filter by `session.shop` and default to **Active** (not cancelled, fully refunded, or fulfilled). `?view=closed` or `?view=all` includes those orders; search uses the same view. The storefront allows only one Record Planet item per cart, bought alone, so the list and search treat `lineItems[0]` as the product. `shopifyApp()` uses `AppDistribution.SingleMerchant`.
 
 ## Extensions
 
@@ -93,4 +93,4 @@ When you change a route, handler, queue rule, or StatusPro contract, add or upda
 
 ## Database
 
-Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify keep-warm and admin add a few more. There is no Aiven PgBouncer on Free. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`.
+Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify keep-warm plus a single admin user add a few more; that is well under the Free cap. There is no Aiven PgBouncer on Free. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`.

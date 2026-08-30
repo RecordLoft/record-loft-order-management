@@ -327,7 +327,7 @@ export default function RecordPlanetOrders() {
                 labelHidden
                 options={[
                   { label: "Active", value: "active" },
-                  { label: "Cancelled, refunded & fulfilled", value: "closed" },
+                  { label: "Cancelled, fully refunded & fulfilled", value: "closed" },
                   { label: "All", value: "all" },
                 ]}
                 value={view}

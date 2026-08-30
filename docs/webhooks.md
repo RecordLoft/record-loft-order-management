@@ -8,7 +8,7 @@ Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinat
 |---|---|---|
 | `products/create`, `products/update` | `pubsub://record-loft:shopify-products` | High volume. Shopify succeeds when GCP accepts the publish, not when GraphQL finishes. |
 | `orders/create` | `pubsub://record-loft:shopify-orders` | Same worker URL, separate topic so you can split later. |
-| `orders/cancelled`, `refunds/create`, `orders/fulfilled` | `pubsub://record-loft:shopify-orders` | Cancel, any refund (partial or full), and fully fulfilled. DB-only handlers. |
+| `orders/cancelled`, `refunds/create`, `orders/fulfilled` | `pubsub://record-loft:shopify-orders` | Cancel, full refund (`refundedAt` only when the refund covers the order), and fully fulfilled. Partial refunds stay Active. DB-only handlers. |
 | `app/uninstalled`, `app/scopes_update` | HTTPS on Netlify | Rare, part of the app install. Shopify HMAC via `authenticate.webhook()`. |
 | StatusPro | `/api/webhooks/order-status-pro/:token` | Third party, not Shopify HMAC. |
 
@@ -27,7 +27,7 @@ Shop event
               → 200 ack or 500 retry
 ```
 
-If enqueue fails, the worker returns **500** and does **not** run the handler. If another instance already claimed the row, it returns **500** (`busy`) so Pub/Sub retries after the first instance finishes. A `processing` row whose `lastAttemptAt` is older than 3 minutes is treated as abandoned; the next delivery (or Redrive) can claim it.
+If enqueue fails, the worker returns **500** and does **not** run the handler. If another instance already claimed the row, it returns **500** (`busy`) so Pub/Sub retries after the first instance finishes. A `processing` row whose `lastAttemptAt` is older than 90 seconds is treated as abandoned; the next delivery (or Redrive) can claim it. SIGTERM releases the claim so a retry does not wait out the lease.
 
 Both topics push to the same service. Example URL (may change on recreate):
 
@@ -68,10 +68,10 @@ HTTPS `app/uninstalled` and `app/scopes_update` on Netlify still use `authentica
 `WebhookFailure` is the dead-letter queue. There is no GCP dead-letter topic.
 
 - **Pending** — handler failed, `attempts < 5`, still retryable. Worker returns HTTP 500 so Pub/Sub redelivers.
-- **Processing** — a Cloud Run instance claimed the row and is running the handler. `lastAttemptAt` is the lease start. After 3 minutes the row is stale: Pub/Sub redelivery can steal the claim, and `/app/webhooks-admin` can Redrive it (badge **Stuck**).
+- **Processing** — a Cloud Run instance claimed the row and is running the handler. `lastAttemptAt` is the lease start. After 90 seconds the row is stale: Pub/Sub redelivery can steal the claim, and `/app/webhooks-admin` can Redrive it (badge **Stuck**).
 - **Failed** — attempt 5 exhausted, no offline session (product/create), or a terminal error (`product_not_found`, non-retryable GraphQL `userErrors`). Worker returns 200 so Pub/Sub stops. These rows are the DLQ.
 - **Success** — row is deleted.
-- **`ack_drop`** — invalid JSON, oversized body, missing fields, or a topic the worker will not handle. Worker still returns 200 (stop Pub/Sub). The row is stored with handler `ack_drop` and a hashed unique `resourceId` so distinct poison messages do not overwrite each other. Redrive skips these.
+- **`ack_drop`** — invalid JSON, oversized body, missing fields, or a topic the worker will not handle. After the row is stored the worker returns 200 (stop Pub/Sub). If persist fails, it returns 500 so Pub/Sub retries instead of dropping the message. The row uses handler `ack_drop` and a hashed unique `resourceId` so distinct poison messages do not overwrite each other. Redrive skips these.
 
 **App → Webhook DLQ** (`/app/webhooks-admin`) defaults to failed rows. **Redrive** publishes the stored payload back to Pub/Sub and resets `attempts` to 0. A new Shopify event for the same product/order does the same reset (fresh 5 tries) without opening the DLQ. Live pending / processing rows are read-only; stale processing (lease expired) can be redriven. Netlify does not run handlers.
 
@@ -102,7 +102,7 @@ gcloud iam service-accounts keys create /tmp/netlify-pubsub-publisher.json \
 
 Paste the JSON file contents into Netlify as `GCP_PUBSUB_SA_JSON`. Do not commit the key.
 
-Pub/Sub retries on HTTP 500 while `attempts < 5` and the error is retryable. Exhausted failures, no offline session, and terminal errors return 200 (row stays in the DLQ). Poison / unknown topic also returns 200; those land as `ack_drop` rows instead of disappearing.
+Pub/Sub retries on HTTP 500 while `attempts < 5` and the error is retryable. Exhausted failures, no offline session, and terminal errors return 200 (row stays in the DLQ). Poison / unknown topic returns 200 after the `ack_drop` row is stored; persist failure returns 500.
 
 `GET /` is liveness (no DB). `GET /health` runs `SELECT 1` against Aiven and returns 503 if the database is down.
 

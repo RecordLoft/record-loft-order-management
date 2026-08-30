@@ -271,7 +271,7 @@ type OrderWithLineItems = {
   lineItems: { id: bigint }[];
 };
 
-/** Each order has one product; exclude orders that do not match the active search. */
+/** Storefront: one Record Planet item per cart, bought alone. Search uses that first line item. */
 export function filterRecordPlanetOrdersForSearch<T extends OrderWithLineItems>(
   orders: T[],
   match: RecordPlanetSearchMatch,

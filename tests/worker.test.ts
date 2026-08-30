@@ -8,6 +8,7 @@ const {
   claimWebhookWork,
   processWebhookWork,
   recordAckDrop,
+  releaseWebhookWork,
 } = vi.hoisted(() => ({
   prismaMock: {
     $queryRaw: vi.fn(),
@@ -16,6 +17,7 @@ const {
   claimWebhookWork: vi.fn(),
   processWebhookWork: vi.fn(),
   recordAckDrop: vi.fn(),
+  releaseWebhookWork: vi.fn(),
 }));
 
 vi.mock("../app/db.server", () => ({
@@ -29,12 +31,14 @@ vi.mock("../webhooks/queue.server", () => ({
   claimWebhookWork,
   processWebhookWork,
   recordAckDrop,
+  releaseWebhookWork,
 }));
 
 import {
   allowedTopicsFromEnv,
   handlePush,
   handleWorkerRequest,
+  releaseClaimedWork,
   workerState,
 } from "../webhooks/worker.server";
 
@@ -100,6 +104,7 @@ describe("allowedTopicsFromEnv", () => {
 describe("handlePush", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    workerState.claimedWork = null;
     recordAckDrop.mockResolvedValue({});
     tryEnqueueWebhookWork.mockResolvedValue({ row: { id: "1" }, error: null });
     claimWebhookWork.mockResolvedValue(true);
@@ -145,6 +150,17 @@ describe("handlePush", () => {
     expect(unknown.body).toMatchObject({
       status: "ignored",
       reason: "unsupported topic app/uninstalled",
+    });
+  });
+
+  it("returns 500 when ack-drop persist fails so Pub/Sub retries", async () => {
+    recordAckDrop.mockRejectedValue(new Error("db down"));
+    const res = mockRes();
+    await handlePush(requestFrom("{") as never, res as never);
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({
+      status: "ack_drop_persist_failed",
+      reason: "invalid json",
     });
   });
 
@@ -229,6 +245,7 @@ describe("handleWorkerRequest", () => {
   beforeEach(() => {
     workerState.shuttingDown = false;
     workerState.inFlight = 0;
+    workerState.claimedWork = null;
     prismaMock.$queryRaw.mockResolvedValue([{ "?column?": 1 }]);
   });
 
@@ -276,5 +293,32 @@ describe("handleWorkerRequest", () => {
       missing as never,
     );
     expect(missing.statusCode).toBe(404);
+  });
+});
+
+describe("releaseClaimedWork", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    workerState.claimedWork = null;
+    releaseWebhookWork.mockResolvedValue(true);
+  });
+
+  it("releases the claimed row and clears worker state", async () => {
+    const claimed = {
+      shop: "record-loft.myshopify.com",
+      handler: WebhookFailureHandler.orders_create,
+      topic: "ORDERS_CREATE",
+      resourceId: 7,
+      payload: { id: 7 },
+    };
+    workerState.claimedWork = claimed;
+    await releaseClaimedWork();
+    expect(releaseWebhookWork).toHaveBeenCalledWith(claimed);
+    expect(workerState.claimedWork).toBeNull();
+  });
+
+  it("no-ops when nothing is claimed", async () => {
+    await releaseClaimedWork();
+    expect(releaseWebhookWork).not.toHaveBeenCalled();
   });
 });

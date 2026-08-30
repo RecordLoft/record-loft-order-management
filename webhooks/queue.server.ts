@@ -32,8 +32,8 @@ export type WebhookWorkInput = {
 
 const ERROR_MESSAGE_MAX_LENGTH = 2000;
 
-/** Cloud Run timeout is 60s. After this, a `processing` row can be claimed or redriven. */
-export const PROCESSING_LEASE_MS = 3 * 60 * 1000;
+/** Cloud Run timeout is 60s. 90s is timeout + buffer so a dead claim is stealable on the next Pub/Sub retry. */
+export const PROCESSING_LEASE_MS = 90_000;
 
 export function processingLeaseCutoff(now = Date.now()): Date {
   return new Date(now - PROCESSING_LEASE_MS);
@@ -496,6 +496,22 @@ export async function claimWebhookWork(input: WebhookWorkInput): Promise<boolean
     data: {
       status: WebhookFailureStatus.processing,
       lastAttemptAt: now,
+    },
+  });
+  return result.count > 0;
+}
+
+/** Drop a claim so Pub/Sub retry can run after SIGTERM / crash recovery. */
+export async function releaseWebhookWork(input: WebhookWorkInput): Promise<boolean> {
+  const result = await prisma.webhookFailure.updateMany({
+    where: {
+      shop: input.shop,
+      handler: input.handler,
+      resourceId: resourceIdBigInt(input),
+      status: WebhookFailureStatus.processing,
+    },
+    data: {
+      status: WebhookFailureStatus.pending,
     },
   });
   return result.count > 0;

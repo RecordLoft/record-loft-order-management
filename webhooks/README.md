@@ -1,6 +1,6 @@
 # Webhooks
 
-Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (failed rows after 5 auto-retries, plus `ack_drop`). `app/webhook-retry-publish.server.ts` redrives stored payloads to Pub/Sub; Netlify does not run handlers. Redrive skips `ack_drop` rows and live `processing` rows; stale processing (lease older than 3 minutes) can be redriven.
+Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (failed rows after 5 auto-retries, plus `ack_drop`). `app/webhook-retry-publish.server.ts` redrives stored payloads to Pub/Sub; Netlify does not run handlers. Redrive skips `ack_drop` rows and live `processing` rows; stale processing (lease older than 90 seconds) can be redriven. SIGTERM releases a live claim. Ack-drop persist failure returns 500.
 
 `app/` stays the React Router app. This folder is what Cloud Run runs.
 
@@ -12,7 +12,7 @@ Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (fai
 | `product-description.handler.server.ts` | Rebuild product `descriptionHtml` |
 | `product-description.server.ts` | Description metafield → HTML |
 | `orders-create.handler.server.ts` | Import the order, apply pending cancel/refund/OSP, mark fulfillment in progress |
-| `orders-lifecycle.handler.server.ts` | `orders/cancelled`, `orders/fulfilled`, and `refunds/create` (DB-only; pending if the order is not imported yet) |
+| `orders-lifecycle.handler.server.ts` | `orders/cancelled`, `orders/fulfilled`, and `refunds/create` (full refund only; pending if the order is not imported yet) |
 | `shopify-fulfillment.server.ts` | Fulfillment-order progress mutations |
 | `types.server.ts` | Handler result type |
 
