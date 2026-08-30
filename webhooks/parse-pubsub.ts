@@ -67,12 +67,22 @@ export function handlerForTopic(
   return TOPIC_HANDLERS[normalized] ?? TOPIC_HANDLERS[topic.toLowerCase()];
 }
 
+export const ADMIN_RETRY_ATTRIBUTE = "X-Retry-Source";
+export const ADMIN_RETRY_VALUE = "admin";
+
+export function isAdminRetry(
+  attributes: Record<string, string> | undefined,
+): boolean {
+  return attribute(attributes, ADMIN_RETRY_ATTRIBUTE) === ADMIN_RETRY_VALUE;
+}
+
+/** Shopify messages must present a matching HMAC. Missing header or secret fails. */
 export function verifyShopifyHmac(
   rawBody: Buffer,
   hmacHeader: string | undefined,
   secret: string | undefined,
 ): boolean {
-  if (!hmacHeader || !secret) return true;
+  if (!hmacHeader || !secret) return false;
   const digest = createHmac("sha256", secret).update(rawBody).digest("base64");
   const expected = Buffer.from(digest);
   const actual = Buffer.from(hmacHeader);

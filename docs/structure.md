@@ -11,7 +11,7 @@ app/                    React Router app (Netlify)
   order-status-pro.server.ts
 webhooks/               Cloud Run worker, queue, handlers
 .github/workflows/      Deploy webhooks to Cloud Run
-netlify/functions/      warm-app (health), db-ping
+netlify/functions/      warm-app (hits /api/health every 5 min)
 prisma/                 Schema + migrations
 extensions/             Admin action extensions (Shopify-hosted)
 certs/aiven-ca.pem      TLS CA for Aiven

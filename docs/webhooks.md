@@ -97,8 +97,10 @@ Not needed on Cloud Run: `DIRECT_URL`, StatusPro, `CRON_SECRET`.
 gcloud pubsub topics publish shopify-products \
   --project=record-loft \
   --message='{"id":YOUR_PRODUCT_NUMERIC_ID}' \
-  --attribute=X-Shopify-Topic=products/update,X-Shopify-Shop-Domain=YOUR_SHOP.myshopify.com,X-Shopify-Webhook-Id=manual-1
+  --attribute=X-Shopify-Topic=products/update,X-Shopify-Shop-Domain=YOUR_SHOP.myshopify.com,X-Shopify-Webhook-Id=manual-1,X-Retry-Source=admin
 ```
+
+`X-Retry-Source=admin` skips Shopify HMAC (same as `/app/webhooks-admin` retry). Live Shopify messages must include a valid HMAC.
 
 Use a real product id. A fake id (`1`) returns `product_not_found` and Pub/Sub will retry until you seek the subscription.
 

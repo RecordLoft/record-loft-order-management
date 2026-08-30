@@ -5,6 +5,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { closeDb } from "../app/db.server";
 import {
+  isAdminRetry,
   parsePubSubPush,
   verifyShopifyHmac,
   type PubSubPushEnvelope,
@@ -59,7 +60,9 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
         ([key]) => key.toLowerCase() === "x-shopify-hmac-sha256",
       )?.[1]
     : undefined;
-  if (
+  if (isAdminRetry(envelope.message?.attributes)) {
+    // Admin republish has no Shopify HMAC; topic publish IAM is the gate.
+  } else if (
     !verifyShopifyHmac(
       parsed.rawPayload,
       hmac,

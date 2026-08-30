@@ -4,7 +4,11 @@ import {
   WebhookFailureStatus,
 } from "../generated/prisma/client";
 import { prisma } from "./db.server";
-import { normalizeTopic } from "../webhooks/parse-pubsub";
+import {
+  ADMIN_RETRY_ATTRIBUTE,
+  ADMIN_RETRY_VALUE,
+  normalizeTopic,
+} from "../webhooks/parse-pubsub";
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID ?? "record-loft";
 const TOKEN_AUD = "https://oauth2.googleapis.com/token";
@@ -101,6 +105,7 @@ async function publishMessages(
       attributes: {
         "X-Shopify-Topic": normalizeTopic(row.topic),
         "X-Shopify-Shop-Domain": row.shop,
+        [ADMIN_RETRY_ATTRIBUTE]: ADMIN_RETRY_VALUE,
         ...(row.webhookId ? { "X-Shopify-Webhook-Id": row.webhookId } : {}),
       },
     })),

@@ -4,7 +4,7 @@ import { fetchAppPath } from "../lib/site-url";
 /**
  * Keeps the React Router System function warm for the embedded admin.
  * Shopify product/order webhooks go to Pub/Sub → Cloud Run, not here.
- * Complements hourly db-ping (DB canary), which does not warm System.
+ * Also keeps Aiven awake via /api/health's Session count.
  */
 export default async () => {
   const started = Date.now();
@@ -14,20 +14,45 @@ export default async () => {
     const body = await response.text();
     const latencyMs = Date.now() - started;
 
+    const health = parseHealthBody(body);
+
     if (!response.ok) {
       console.error(
-        `[warm-app] /api/health status=${response.status} latencyMs=${latencyMs} body=${body.slice(0, 300)}`,
+        `[warm-app] /api/health status=${response.status} latencyMs=${latencyMs} ${formatHealthFields(health)} body=${body.slice(0, 300)}`,
       );
       return new Response(body, { status: response.status });
     }
 
-    console.log(`[warm-app] ok latencyMs=${latencyMs} body=${body}`);
+    console.log(
+      `[warm-app] ok latencyMs=${latencyMs} ${formatHealthFields(health)}`,
+    );
     return new Response(body, { status: 200 });
   } catch (error) {
     console.error("[warm-app] failed:", error);
     return new Response(String(error), { status: 500 });
   }
 };
+
+type HealthBody = {
+  cold?: boolean;
+  dbMs?: number;
+  totalMs?: number;
+  sessions?: number;
+};
+
+function parseHealthBody(body: string): HealthBody | null {
+  try {
+    const parsed = JSON.parse(body) as HealthBody;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatHealthFields(health: HealthBody | null): string {
+  if (!health) return "cold=? dbMs=? totalMs=? sessions=?";
+  return `cold=${health.cold ?? "?"} dbMs=${health.dbMs ?? "?"} totalMs=${health.totalMs ?? "?"} sessions=${health.sessions ?? "?"}`;
+}
 
 export const config: Config = {
   schedule: "*/5 * * * *",
