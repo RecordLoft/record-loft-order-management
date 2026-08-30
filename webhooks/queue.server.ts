@@ -26,6 +26,21 @@ export type WebhookWorkInput = {
 
 const ERROR_MESSAGE_MAX_LENGTH = 2000;
 
+/** Cloud Run timeout is 60s. After this, a `processing` row can be claimed or redriven. */
+export const PROCESSING_LEASE_MS = 3 * 60 * 1000;
+
+export function processingLeaseCutoff(now = Date.now()): Date {
+  return new Date(now - PROCESSING_LEASE_MS);
+}
+
+export function isProcessingLeaseExpired(
+  lastAttemptAt: Date | null | undefined,
+  now = Date.now(),
+): boolean {
+  if (lastAttemptAt == null) return true;
+  return lastAttemptAt.getTime() <= now - PROCESSING_LEASE_MS;
+}
+
 /** Shopify admin graphql may throw Response (not Error) via handleClientError. */
 async function formatError(error: unknown): Promise<string> {
   if (error instanceof Error) return error.message;
@@ -420,14 +435,26 @@ export async function processWebhookWork(
 
 /** Mark the coalesced row in-flight so a second Cloud Run instance waits. */
 export async function claimWebhookWork(input: WebhookWorkInput): Promise<boolean> {
+  const now = new Date();
+  const staleBefore = processingLeaseCutoff(now.getTime());
   const result = await prisma.webhookFailure.updateMany({
     where: {
       shop: input.shop,
       handler: input.handler,
       resourceId: resourceIdBigInt(input),
-      status: { not: WebhookFailureStatus.processing },
+      OR: [
+        { status: { not: WebhookFailureStatus.processing } },
+        { status: WebhookFailureStatus.processing, lastAttemptAt: null },
+        {
+          status: WebhookFailureStatus.processing,
+          lastAttemptAt: { lte: staleBefore },
+        },
+      ],
     },
-    data: { status: WebhookFailureStatus.processing },
+    data: {
+      status: WebhookFailureStatus.processing,
+      lastAttemptAt: now,
+    },
   });
   return result.count > 0;
 }

@@ -46,6 +46,8 @@ model Order {
   deliveryMethod String?
   ospStatusName     String?
   ospStatusSyncedAt DateTime?
+
+  @@index([shop, deliveryMethod])
 }
 
 model LineItem {

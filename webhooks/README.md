@@ -1,14 +1,14 @@
 # Webhooks
 
-Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (failed rows after 5 auto-retries). `app/webhook-retry-publish.server.ts` redrives stored payloads to Pub/Sub; Netlify does not run handlers.
+Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (failed rows after 5 auto-retries, plus `ack_drop`). `app/webhook-retry-publish.server.ts` redrives stored payloads to Pub/Sub; Netlify does not run handlers. Redrive skips `ack_drop` rows and live `processing` rows; stale processing (lease older than 3 minutes) can be redriven.
 
 `app/` stays the React Router app. This folder is what Cloud Run runs.
 
 | File | Role |
 |---|---|
-| `worker.server.ts` | Cloud Run HTTP server (Pub/Sub push) |
+| `worker.server.ts` | Cloud Run HTTP server (Pub/Sub push). `GET /` liveness, `GET /health` DB ping. |
 | `parse-pubsub.ts` | Decode the push envelope + Shopify attributes |
-| `queue.server.ts` | Coalesce, run, persist / delete `WebhookFailure` |
+| `queue.server.ts` | Coalesce, claim (`processing`), run, persist / delete `WebhookFailure` |
 | `product-description.handler.server.ts` | Rebuild product `descriptionHtml` |
 | `product-description.server.ts` | Description metafield → HTML |
 | `orders-create.handler.server.ts` | Import the order, mark fulfillment in progress |

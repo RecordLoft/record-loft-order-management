@@ -26,8 +26,15 @@ import type {
 } from "../../generated/prisma/client";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
-import { republishWebhookFailures } from "../webhook-retry-publish.server";
-import { listWebhookFailures } from "../../webhooks/queue.server";
+import {
+  redriveSkipReason,
+  republishWebhookFailures,
+} from "../webhook-retry-publish.server";
+import {
+  isProcessingLeaseExpired,
+  listWebhookFailures,
+  processingLeaseCutoff,
+} from "../../webhooks/queue.server";
 
 const VIEW_FILTERS = ["failed", "retrying", "all"] as const;
 type ViewFilter = (typeof VIEW_FILTERS)[number];
@@ -56,6 +63,7 @@ type SerializedJob = {
   errorCode: string | null;
   errorMessage: string | null;
   updatedAt: string;
+  leaseExpired: boolean;
 };
 
 function resourceAdminUrl(
@@ -93,7 +101,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const view = parseView(new URL(request.url).searchParams.get("status"));
 
-  const [jobs, grouped] = await Promise.all([
+  const staleBefore = processingLeaseCutoff();
+  const [jobs, grouped, staleProcessing] = await Promise.all([
     listWebhookFailures(session.shop, {
       statuses: listStatuses(view),
       limit: 100,
@@ -102,6 +111,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       by: ["status"],
       where: { shop: session.shop },
       _count: { _all: true },
+    }),
+    prisma.webhookFailure.count({
+      where: {
+        shop: session.shop,
+        handler: { not: "ack_drop" },
+        status: "processing",
+        OR: [{ lastAttemptAt: null }, { lastAttemptAt: { lte: staleBefore } }],
+      },
     }),
   ]);
 
@@ -134,11 +151,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         errorCode: job.errorCode,
         errorMessage: job.errorMessage,
         updatedAt: job.updatedAt.toISOString(),
+        leaseExpired: isProcessingLeaseExpired(job.lastAttemptAt),
       },
     ];
   });
 
-  return { shop: session.shop, jobs: serialized, counts, view };
+  return { shop: session.shop, jobs: serialized, counts, view, staleProcessing };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -153,7 +171,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ids: [id],
       });
       if (queued === 0) {
-        return { ok: false, message: "Dead letter not found." };
+        return {
+          ok: false,
+          message: await redriveSkipReason(session.shop, id),
+        };
       }
       return {
         ok: true,
@@ -179,15 +200,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { ok: false, message: "Unknown action." };
 };
 
-function statusBadge(status: WebhookFailureStatus) {
+function statusBadge(status: WebhookFailureStatus, leaseExpired: boolean) {
   if (status === "failed") {
     return <Badge tone="critical">Dead letter</Badge>;
+  }
+  if (status === "processing" && leaseExpired) {
+    return <Badge tone="warning">Stuck</Badge>;
   }
   return <Badge tone="attention">Retrying</Badge>;
 }
 
 export default function WebhookDeadLettersPage() {
-  const { shop, jobs, counts, view } = useLoaderData<typeof loader>();
+  const { shop, jobs, counts, view, staleProcessing } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const { revalidate, state: revalidatorState } = useRevalidator();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -245,7 +270,7 @@ export default function WebhookDeadLettersPage() {
       subtitle={subtitle}
       fullWidth
       primaryAction={
-        counts.failed > 0
+        counts.failed + staleProcessing > 0
           ? {
               content: "Redrive all",
               loading: redrivingAll,
@@ -338,7 +363,9 @@ export default function WebhookDeadLettersPage() {
                       job.resourceId,
                     );
                     const canRedrive =
-                      job.status === "failed" && job.handler !== "ack_drop";
+                      job.handler !== "ack_drop" &&
+                      (job.status === "failed" ||
+                        (job.status === "processing" && job.leaseExpired));
                     const busy = redrivingAll || redrivingId === job.id;
 
                     return (
@@ -366,7 +393,9 @@ export default function WebhookDeadLettersPage() {
                             job.resourceId
                           )}
                         </IndexTable.Cell>
-                        <IndexTable.Cell>{statusBadge(job.status)}</IndexTable.Cell>
+                        <IndexTable.Cell>
+                          {statusBadge(job.status, job.leaseExpired)}
+                        </IndexTable.Cell>
                         <IndexTable.Cell>
                           {job.attempts}/{job.maxAttempts}
                         </IndexTable.Cell>

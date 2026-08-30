@@ -9,6 +9,10 @@ import {
   ADMIN_RETRY_VALUE,
   normalizeTopic,
 } from "../webhooks/parse-pubsub";
+import {
+  isProcessingLeaseExpired,
+  processingLeaseCutoff,
+} from "../webhooks/queue.server";
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID ?? "record-loft";
 const TOKEN_AUD = "https://oauth2.googleapis.com/token";
@@ -133,21 +137,30 @@ async function publishMessages(
   }
 }
 
-/**
- * Re-publish stored webhook payloads so Cloud Run processes them.
- * Netlify does not run handlers.
- */
+function redriveableWhere(shop: string, ids?: string[]) {
+  const staleBefore = processingLeaseCutoff();
+  return {
+    shop,
+    handler: { not: WebhookFailureHandler.ack_drop },
+    OR: [
+      { status: WebhookFailureStatus.failed },
+      { status: WebhookFailureStatus.processing, lastAttemptAt: null },
+      {
+        status: WebhookFailureStatus.processing,
+        lastAttemptAt: { lte: staleBefore },
+      },
+    ],
+    ...(ids ? { id: { in: ids } } : {}),
+  };
+}
+
+/** Re-publish stored payloads so Cloud Run processes them. Netlify does not run handlers. */
 export async function republishWebhookFailures(
   shop: string,
   options: { ids?: string[]; limit?: number } = {},
 ): Promise<RepublishResult> {
   const rows = await prisma.webhookFailure.findMany({
-    where: {
-      shop,
-      status: WebhookFailureStatus.failed,
-      handler: { not: WebhookFailureHandler.ack_drop },
-      ...(options.ids ? { id: { in: options.ids } } : {}),
-    },
+    where: redriveableWhere(shop, options.ids),
     orderBy: { updatedAt: "asc" },
     take: options.limit ?? 20,
     select: {
@@ -188,4 +201,29 @@ export async function republishWebhookFailures(
   });
 
   return { queued: rows.length, ids: rows.map((row) => row.id) };
+}
+
+/** Why a single-row Redrive found nothing (live processing vs missing). */
+export async function redriveSkipReason(
+  shop: string,
+  id: string,
+): Promise<string> {
+  const row = await prisma.webhookFailure.findFirst({
+    where: { shop, id },
+    select: { status: true, lastAttemptAt: true, handler: true },
+  });
+  if (!row) return "Dead letter not found.";
+  if (row.handler === WebhookFailureHandler.ack_drop) {
+    return "Dropped messages cannot be redriven.";
+  }
+  if (
+    row.status === WebhookFailureStatus.processing &&
+    !isProcessingLeaseExpired(row.lastAttemptAt)
+  ) {
+    return "Still processing. Wait a few minutes after the lease expires.";
+  }
+  if (row.status === WebhookFailureStatus.pending) {
+    return "Already queued for retry.";
+  }
+  return "Dead letter not found.";
 }

@@ -144,7 +144,7 @@ export async function handleOrdersCreate(
         outcome: "error",
         code: "graphql_errors",
         message: JSON.stringify(json.errors),
-        retry: false,
+        retry: true,
       };
     }
 
@@ -193,72 +193,70 @@ export async function handleOrdersCreate(
   );
 
   const customerPhone = resolveCustomerPhone(payload);
-
-  await prisma.order.upsert({
-    where: { id: BigInt(id) },
-    update: {
-      deliveryMethod,
-    },
-    create: {
-      id: BigInt(id),
-      orderNumber: order_number,
-      shop,
-      totalPrice: total_price,
-      currency,
-      deliveryMethod,
-      customer: customer
-        ? {
-            connectOrCreate: {
-              where: { id: BigInt(customer.id) },
-              create: {
-                id: BigInt(customer.id),
-                email: customer.email,
-                firstName: customer.first_name,
-                lastName: customer.last_name,
-                phone: customerPhone,
-              },
-            },
-          }
-        : undefined,
-      lineItems: {
-        create: line_items.map((item) => {
-          const enrichment = productMap.get(item.product_id?.toString() ?? "");
-
-          return {
-            id: BigInt(item.id),
-            title: item.title,
-            quantity: item.quantity,
-            price: item.price,
-            variantId: item.variant_id ? BigInt(item.variant_id) : null,
-            sku: item.sku,
-            properties: flattenProperties(item.properties ?? []),
-            productType: enrichment?.productType ?? null,
-            storeSection: enrichment?.storeSection ?? null,
-            category: enrichment?.category ?? null,
-          };
-        }),
-      },
-    },
+  const orderId = BigInt(id);
+  const lineItemRows = line_items.map((item) => {
+    const enrichment = productMap.get(item.product_id?.toString() ?? "");
+    return {
+      id: BigInt(item.id),
+      orderId,
+      title: item.title,
+      quantity: item.quantity,
+      price: item.price,
+      variantId: item.variant_id ? BigInt(item.variant_id) : null,
+      sku: item.sku,
+      properties: flattenProperties(item.properties ?? []),
+      productType: enrichment?.productType ?? null,
+      storeSection: enrichment?.storeSection ?? null,
+      category: enrichment?.category ?? null,
+    };
   });
 
-  if (customer) {
-    await prisma.customer.upsert({
-      where: { id: BigInt(customer.id) },
+  await prisma.$transaction(async (tx) => {
+    if (customer) {
+      await tx.customer.upsert({
+        where: { id: BigInt(customer.id) },
+        update: {
+          email: customer.email,
+          firstName: customer.first_name,
+          lastName: customer.last_name,
+          phone: customerPhone,
+        },
+        create: {
+          id: BigInt(customer.id),
+          email: customer.email,
+          firstName: customer.first_name,
+          lastName: customer.last_name,
+          phone: customerPhone,
+        },
+      });
+    }
+
+    await tx.order.upsert({
+      where: { id: orderId },
       update: {
-        email: customer.email,
-        firstName: customer.first_name,
-        lastName: customer.last_name,
-        phone: customerPhone,
+        shop,
+        orderNumber: order_number,
+        totalPrice: total_price,
+        currency,
+        deliveryMethod,
+        customerId: customer ? BigInt(customer.id) : undefined,
       },
       create: {
-        id: BigInt(customer.id),
-        email: customer.email,
-        firstName: customer.first_name,
-        lastName: customer.last_name,
-        phone: customerPhone,
+        id: orderId,
+        orderNumber: order_number,
+        shop,
+        totalPrice: total_price,
+        currency,
+        deliveryMethod,
+        customerId: customer ? BigInt(customer.id) : null,
       },
     });
-  }
+
+    await tx.lineItem.deleteMany({ where: { orderId } });
+    if (lineItemRows.length > 0) {
+      await tx.lineItem.createMany({ data: lineItemRows });
+    }
+  });
 
   console.log(`[${threadId}] Imported order ${BigInt(id)}`);
 

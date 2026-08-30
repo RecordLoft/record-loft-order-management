@@ -2,6 +2,8 @@
 
 GitHub Actions builds `Dockerfile.worker` and deploys Cloud Run `shopify-webhooks` on push to `main` (path-filtered) or **Actions → Deploy webhooks → Run workflow**.
 
+If the deploy includes a Prisma schema change, run `yarn prisma migrate deploy` against Aiven **before** the new revision starts. The worker image does not run migrations.
+
 Auth is **Workload Identity Federation**. There is no GCP JSON key in GitHub.
 
 Existing Cloud Run env (`DATABASE_URL`, Shopify client id/secret, `SCOPES`, `SHOPIFY_APP_URL`) is left as-is. The workflow does not pass secrets.
@@ -90,5 +92,7 @@ gcloud run deploy shopify-webhooks \
 Or `gcloud builds submit . --project=record-loft --config=cloudbuild.worker.yaml` if you still want Cloud Build.
 
 ## After deploy
+
+`GET /` on the service URL should return `{ ok: true }`. `GET /health` should return `{ ok: true, db: true }` (needs an authenticated caller; use Cloud Run logs or an identity token).
 
 Edit a product in Shopify admin. Cloud Run logs should show `[pubsub-worker] topic=products/update`.
