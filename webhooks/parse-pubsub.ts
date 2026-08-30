@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { WebhookFailureHandler } from "../generated/prisma/client";
 import type { WebhookWorkInput } from "./queue.server";
 
@@ -76,25 +75,9 @@ export function isAdminRetry(
   return attribute(attributes, ADMIN_RETRY_ATTRIBUTE) === ADMIN_RETRY_VALUE;
 }
 
-/** Shopify messages must present a matching HMAC. Missing header or secret fails. */
-export function verifyShopifyHmac(
-  rawBody: Buffer,
-  hmacHeader: string | undefined,
-  secret: string | undefined,
-): boolean {
-  if (!hmacHeader || !secret) return false;
-  const digest = createHmac("sha256", secret).update(rawBody).digest("base64");
-  const expected = Buffer.from(digest);
-  const actual = Buffer.from(hmacHeader);
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
-}
-
 export function parsePubSubPush(
   envelope: PubSubPushEnvelope,
-):
-  | { ok: true; parsed: ParsedPubSubWebhook; rawPayload: Buffer }
-  | { ok: false; reason: string } {
+): { ok: true; parsed: ParsedPubSubWebhook } | { ok: false; reason: string } {
   const message = envelope.message;
   if (!message?.data) {
     return { ok: false, reason: "missing message.data" };
@@ -160,7 +143,6 @@ export function parsePubSubPush(
 
   return {
     ok: true,
-    rawPayload,
     parsed: {
       topic: normalizeTopic(topic),
       shop,

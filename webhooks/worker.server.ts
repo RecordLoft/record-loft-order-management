@@ -2,19 +2,25 @@
  * Cloud Run Pub/Sub push worker. Deploy via .github/workflows/deploy-webhooks.yml.
  * Manual fallback: docs/deploy-webhooks.md
  */
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { closeDb } from "../app/db.server";
 import {
   isAdminRetry,
   parsePubSubPush,
-  verifyShopifyHmac,
   type PubSubPushEnvelope,
 } from "./parse-pubsub";
 import { processWebhookWork, tryEnqueueWebhookWork } from "./queue.server";
 
 const PORT = Number(process.env.PORT || 8080);
 const ALLOWED_TOPICS = new Set(
-  (process.env.ALLOWED_TOPICS ?? "products/create,products/update,orders/create")
+  (
+    process.env.ALLOWED_TOPICS ??
+    "products/create,products/update,orders/create"
+  )
     .split(",")
     .map((topic) => topic.trim().toLowerCase())
     .filter(Boolean),
@@ -55,29 +61,13 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
-  const hmac = envelope.message?.attributes
-    ? Object.entries(envelope.message.attributes).find(
-        ([key]) => key.toLowerCase() === "x-shopify-hmac-sha256",
-      )?.[1]
-    : undefined;
-  if (isAdminRetry(envelope.message?.attributes)) {
-    // Admin republish has no Shopify HMAC; topic publish IAM is the gate.
-  } else if (
-    !verifyShopifyHmac(
-      parsed.rawPayload,
-      hmac,
-      process.env.SHOPIFY_API_SECRET,
-    )
-  ) {
-    console.error("[pubsub-worker] hmac mismatch — ack-drop");
-    send(res, 200, { status: "ignored", reason: "hmac mismatch" });
-    return;
-  }
-
   const { work, topic, shop, messageId } = parsed.parsed;
+  const source = isAdminRetry(envelope.message?.attributes)
+    ? "admin-retry"
+    : "shopify-publish";
   if (!ALLOWED_TOPICS.has(topic)) {
     console.log(
-      `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId}`,
+      `[pubsub-worker] ignored topic=${topic} shop=${shop} messageId=${messageId} source=${source}`,
     );
     send(res, 200, { status: "ignored", reason: `topic ${topic} not allowed` });
     return;
@@ -91,8 +81,8 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
   if (result.status === "success") {
     console.log(
       `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-        `messageId=${messageId} outcome=${result.outcome} detail=${result.detail} ` +
-        `latencyMs=${latencyMs}` +
+        `messageId=${messageId} source=${source} outcome=${result.outcome} ` +
+        `detail=${result.detail} latencyMs=${latencyMs}` +
         (enqueueError ? ` enqueueError=${enqueueError}` : ""),
     );
     send(res, 200, { status: result.outcome, latencyMs });
@@ -101,7 +91,7 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
 
   console.error(
     `[pubsub-worker] topic=${topic} shop=${shop} resourceId=${work.resourceId} ` +
-      `messageId=${messageId} outcome=failure code=${result.code} ` +
+      `messageId=${messageId} source=${source} outcome=failure code=${result.code} ` +
       `message=${result.message} latencyMs=${latencyMs}`,
   );
   send(res, 500, {
@@ -112,14 +102,23 @@ async function handlePush(req: IncomingMessage, res: ServerResponse) {
 }
 
 const server = createServer((req, res) => {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  const url = new URL(
+    req.url ?? "/",
+    `http://${req.headers.host ?? "localhost"}`,
+  );
 
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+  if (
+    req.method === "GET" &&
+    (url.pathname === "/" || url.pathname === "/health")
+  ) {
     send(res, 200, { ok: true });
     return;
   }
 
-  if (req.method === "POST" && (url.pathname === "/" || url.pathname === "/pubsub")) {
+  if (
+    req.method === "POST" &&
+    (url.pathname === "/" || url.pathname === "/pubsub")
+  ) {
     handlePush(req, res).catch((error: unknown) => {
       console.error("[pubsub-worker] unhandled", error);
       send(res, 500, { status: "error" });

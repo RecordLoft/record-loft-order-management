@@ -8,7 +8,7 @@ Shopify app-specific subscriptions live in `shopify.app.toml`. Changing destinat
 |---|---|---|
 | `products/create`, `products/update` | `pubsub://record-loft:shopify-products` | High volume. Shopify succeeds when GCP accepts the publish, not when GraphQL finishes. |
 | `orders/create` | `pubsub://record-loft:shopify-orders` | Same worker URL, separate topic so you can split later. |
-| `app/uninstalled`, `app/scopes_update` | HTTPS on Netlify | Rare, part of the app install. |
+| `app/uninstalled`, `app/scopes_update` | HTTPS on Netlify | Rare, part of the app install. Shopify HMAC via `authenticate.webhook()`. |
 | StatusPro | `/api/webhooks/order-status-pro/:token` | Third party, not Shopify HMAC. |
 
 `SHOPIFY_APP_URL` is still `https://record-loft-order-management.netlify.app`. That is the **embedded app**, not the webhook URL. Cloud Run needs it only because it reuses `shopifyApp()` to load the offline session.
@@ -38,6 +38,26 @@ gcloud run services describe shopify-webhooks --project=record-loft --region=us-
 `concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch).
 
 A successful product description write can fire another `products/update`. Coalesce + “skip if HTML unchanged” limit the echo.
+
+## Why the worker does not verify HMAC
+
+Shopify’s docs say HMAC is for **HTTPS** deliveries. Pub/Sub is authenticated by who can publish to the topic, then by Cloud Run `--no-allow-unauthenticated` (only the push subscription can POST). That is the documented contract.
+
+Messages often include `X-Shopify-Hmac-SHA256` as an attribute, but Shopify does not guarantee it on this transport or document what bytes are signed. Requiring a match (or even verifying only when the attribute is present) 200-ack-drops the event if they omit the header or change the digest. The worker would look healthy and the shop would miss product/order work.
+
+So Cloud Run does not check HMAC. Trust is:
+
+- Topic `roles/pubsub.publisher`: `delivery@shopify-pubsub-webhooks.iam.gserviceaccount.com` and `netlify-pubsub-publisher@record-loft.iam.gserviceaccount.com` only
+- Cloud Run invoker: the Pub/Sub push subscription
+
+```bash
+gcloud pubsub topics get-iam-policy shopify-products --project=record-loft
+gcloud pubsub topics get-iam-policy shopify-orders --project=record-loft
+```
+
+HTTPS `app/uninstalled` and `app/scopes_update` on Netlify still use `authenticate.webhook()` HMAC. That path is documented and required.
+
+`X-Retry-Source=admin` on republish is a log tag (`source=admin-retry` vs `source=shopify-publish`). It is not a security bypass.
 
 ## Failure handling
 
@@ -100,7 +120,7 @@ gcloud pubsub topics publish shopify-products \
   --attribute=X-Shopify-Topic=products/update,X-Shopify-Shop-Domain=YOUR_SHOP.myshopify.com,X-Shopify-Webhook-Id=manual-1,X-Retry-Source=admin
 ```
 
-`X-Retry-Source=admin` skips Shopify HMAC (same as `/app/webhooks-admin` retry). Live Shopify messages must include a valid HMAC.
+`X-Retry-Source=admin` is a log tag (same as `/app/webhooks-admin` retry). It is not required for the worker to accept the message. Topic publish IAM is the gate.
 
 Use a real product id. A fake id (`1`) returns `product_not_found` and Pub/Sub will retry until you seek the subscription.
 
