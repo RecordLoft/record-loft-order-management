@@ -18,6 +18,9 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepare": "husky",
     "worker": "tsx webhooks/worker.server.ts"
   },
   "type": "module",
@@ -66,9 +69,11 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^4.6.2",
     "graphql-config": "^5.1.1",
+    "husky": "^9.1.7",
     "prettier": "^3.8.3",
     "typescript": "^5.9.3",
-    "vite": "^6.3.6"
+    "vite": "^6.3.6",
+    "vitest": "3.2.4"
   },
   "workspaces": [
     "extensions/*"

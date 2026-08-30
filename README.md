@@ -24,6 +24,8 @@ yarn prisma generate
 shopify app dev
 ```
 
+`yarn` runs Husky, which installs a pre-commit hook that runs the full suite (`yarn test`). Use `yarn test:watch` while editing.
+
 Needs `.env` with `DATABASE_URL` (Aiven) and the Shopify app client id/secret (`SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`). Redrive from local `shopify app dev` or Netlify admin also needs `GCP_PUBSUB_SA_JSON` — see [docs/webhooks.md](docs/webhooks.md#environment).
 
 ## Production deploys
