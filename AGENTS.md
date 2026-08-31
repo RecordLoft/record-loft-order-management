@@ -14,6 +14,7 @@ This repo has architecture docs and a Vitest suite. Both are part of the product
 - Location: top-level `tests/` only. Do not colocate server/route/worker tests.
 - Run: `yarn test` (CI + pre-commit) or `yarn test:watch`.
 - Style: mock `app/db.server` and `app/shopify.server`. No live database, Pub/Sub, or StatusPro.
+- Integration: `yarn test:integration` (CI, Docker). Testcontainers Postgres; still mock Shopify / GCP. Files are `tests/**/*.integration.test.ts`.
 - If you change a handler, route, queue rule, or StatusPro contract, update the matching file listed in `docs/structure.md`.
 - Polaris UI and `extensions/` are out of scope unless you add a React test harness.
 

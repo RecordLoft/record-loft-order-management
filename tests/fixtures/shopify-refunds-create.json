@@ -1,0 +1,31 @@
+{
+  "id": 55,
+  "admin_graphql_api_id": "gid://shopify/Refund/55",
+  "order_id": 9001,
+  "created_at": "2026-08-03T12:00:00.000Z",
+  "processed_at": "2026-08-03T12:00:00.000Z",
+  "note": null,
+  "user_id": null,
+  "restock": true,
+  "refund_line_items": [
+    {
+      "id": 1,
+      "quantity": 1,
+      "line_item_id": 11,
+      "location_id": null,
+      "restock_type": "cancel",
+      "line_item": {
+        "id": 11,
+        "quantity": 1,
+        "title": "Kind of Blue",
+        "sku": "KOB"
+      }
+    }
+  ],
+  "order_adjustments": [],
+  "transactions": [],
+  "order": {
+    "id": 9001,
+    "financial_status": "refunded"
+  }
+}

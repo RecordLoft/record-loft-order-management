@@ -36,6 +36,7 @@ vi.mock("../webhooks/shopify-fulfillment.server", () => ({
 }));
 
 import { handleOrdersCreate } from "../webhooks/orders-create.handler.server";
+import ordersCreateFixture from "./fixtures/shopify-orders-create.json";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -103,6 +104,39 @@ describe("handleOrdersCreate", () => {
       retry: true,
     });
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("imports a Shopify orders/create webhook fixture", async () => {
+    const graphql = vi.fn(async () =>
+      jsonResponse({
+        data: {
+          nodes: [
+            {
+              id: "gid://shopify/Product/55",
+              productType: "Vinyl",
+              category: { name: "Jazz" },
+              storeSection: { value: "A1" },
+            },
+          ],
+        },
+      }),
+    );
+
+    await expect(
+      handleOrdersCreate(shop, ordersCreateFixture, graphql),
+    ).resolves.toEqual({
+      outcome: "completed",
+      detail: "imported",
+    });
+    expect(tx.lineItem.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          id: BigInt(11),
+          title: "Kind of Blue",
+          properties: { Artist: "Miles" },
+        }),
+      ],
+    });
   });
 
   it("replaces line items and customer on a create retry", async () => {

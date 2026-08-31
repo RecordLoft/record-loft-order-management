@@ -24,7 +24,7 @@ shopify.app.toml        App URL, scopes, webhook destinations
 Dockerfile.worker       Image for Cloud Run
 ```
 
-Behavior changes must update **docs and tests in the same change**. Read this file and the linked docs before editing. Tests stay in `tests/` (not colocated), mock Prisma / Shopify / GCP, and do not need a live database. Polaris UI and Shopify-hosted extensions are not in the suite.
+Behavior changes must update **docs and tests in the same change**. Read this file and the linked docs before editing. Tests stay in `tests/` (not colocated). `yarn test` mocks Prisma / Shopify / GCP and does not need a live database. `yarn test:integration` uses Testcontainers Postgres (Docker) and still mocks Shopify / GCP. Polaris UI and Shopify-hosted extensions are not in the suite.
 
 ## Netlify routes
 
@@ -67,31 +67,38 @@ They ship with `shopify app deploy`, not Netlify. Each extension has its own `ts
 
 ## Tests
 
-Top-level `tests/` is the suite. `vitest.config.ts` includes `tests/**/*.test.ts`. CI and the pre-commit hook run `yarn test`. Use `yarn test:watch` while editing.
+Top-level `tests/` is the suite. `vitest.config.ts` includes `tests/**/*.test.ts` and excludes `*.integration.test.ts`. CI and the pre-commit hook run `yarn test`. Use `yarn test:watch` while editing.
+
+`yarn test:integration` (`vitest.integration.config.ts`) starts Postgres via Testcontainers, runs `prisma migrate deploy`, and exercises SQL the unit mocks hide: queue unique keys / leases, Record Planet ILIKE and views, pending-import apply. Shopify GraphQL, StatusPro HTTP, and Pub/Sub stay mocked. Docker is required. CI runs this after `yarn test`; pre-commit does not.
+
+Shopify webhook JSON fixtures live in `tests/fixtures/` and are used by the handler unit tests and the pending-import integration test.
 
 | File | Covers |
 |---|---|
 | `parse-pubsub.test.ts` | Pub/Sub envelope, topics, ack-drop context |
-| `queue.test.ts` | Coalesce, claim/lease, enqueue, DLQ, retries |
+| `queue.test.ts` | Coalesce, claim/lease, enqueue (no steal of live processing), DLQ, retries |
 | `product-description.test.ts` | Hidden Shop-channel HTML, metafield sync |
-| `orders-create.handler.test.ts` | Order import, Record Planet fulfillment |
+| `orders-create.handler.test.ts` | Order import, Record Planet fulfillment, Shopify create fixture |
 | `shopify-fulfillment.test.ts` | Fulfillment-order paging and `REPORT_PROGRESS` |
-| `orders-lifecycle.handler.test.ts` | Cancel / refund / fulfill persist and pending import |
+| `orders-lifecycle.handler.test.ts` | Cancel / refund / fulfill persist, pending import apply, Shopify fixtures |
 | `log.test.ts` | Cloud Run JSON log fields, severity, Error stack, trace header |
-| `worker.test.ts` | Cloud Run HTTP: ack, 500 retry, health, shutdown |
-| `record-planet.test.ts` | Search helpers and `/app/record-planet` loader |
-| `order-status-pro.test.ts` | StatusPro client, cache, admin + inbound routes |
-| `webhook-retry-publish.test.ts` | Redrive to Pub/Sub |
-| `admin-routes.test.ts` | DLQ admin, pick list, HTTPS lifecycle |
+| `worker.test.ts` | Cloud Run HTTP: ack, 500 retry, health, ALLOWED_TOPICS, `/pubsub`, shutdown |
+| `record-planet.test.ts` | Search helpers and `/app/record-planet` loader (`view` / `q`) |
+| `order-status-pro.test.ts` | StatusPro client, client throttle, cache, admin + inbound routes |
+| `webhook-retry-publish.test.ts` | Redrive to Pub/Sub (failed + stale processing; publish failure) |
+| `admin-routes.test.ts` | DLQ admin (`status` filter), pick list, HTTPS lifecycle |
 | `cron-health.test.ts` | Cron auth, `/api/health`, site URL |
 | `warm-app.test.ts` | Netlify keep-warm |
+| `queue.integration.test.ts` | Coalesce, DLQ resurrect, live lease, 90s steal, ack-drop uniqueness |
+| `record-planet.integration.test.ts` | ILIKE escape, phone digits, Active/Closed/All, shop scope |
+| `order-import.integration.test.ts` | Cancel + OSP pending applied on create |
 
 When you change a route, handler, queue rule, or StatusPro contract, add or update the matching file. Do not invent a second test tree.
 
 ## CI
 
-`.github/workflows/ci.yml` runs `yarn test` and `yarn typecheck` on pull requests and pushes to `main`. The pre-commit hook still runs `yarn test` locally. Worker deploys stay in `deploy-webhooks.yml` (test → `prisma migrate deploy` with `DATABASE_URL`/`DIRECT_URL` secrets → Cloud Run).
+`.github/workflows/ci.yml` runs `yarn test`, `yarn test:integration` (Docker / Testcontainers Postgres), and `yarn typecheck` on pull requests and pushes to `main`. The pre-commit hook still runs `yarn test` locally (no Docker). Worker deploys stay in `deploy-webhooks.yml` (test → integration → `prisma migrate deploy` with `DATABASE_URL`/`DIRECT_URL` secrets → Cloud Run).
 
 ## Database
 
-Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify keep-warm plus a single admin user add a few more; that is well under the Free cap. There is no Aiven PgBouncer on Free. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`.
+Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify keep-warm plus a single admin user add a few more; that is well under the Free cap. There is no Aiven PgBouncer on Free. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`. Aiven URLs set `sslmode=require` and use `certs/aiven-ca.pem`. Local and Testcontainers URLs without `sslmode` skip TLS.

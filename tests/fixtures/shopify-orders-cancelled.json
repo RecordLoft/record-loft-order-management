@@ -1,0 +1,9 @@
+{
+  "id": 9001,
+  "admin_graphql_api_id": "gid://shopify/Order/9001",
+  "order_number": 101,
+  "cancel_reason": "customer",
+  "cancelled_at": "2026-08-01T12:00:00.000Z",
+  "financial_status": "voided",
+  "fulfillment_status": null
+}

@@ -237,6 +237,23 @@ describe("StatusPro HTTP client", () => {
       RateLimitError,
     );
   });
+
+  it("fails fast on the client bulk window without calling OSP", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ ok: true }));
+    const bulkIds = Array.from({ length: BULK_STATUS_ORDER_THRESHOLD }, (_, i) =>
+      BigInt(i + 1),
+    );
+
+    for (let i = 0; i < 4; i++) {
+      await bulkUpdateOrderStatus(bulkIds, "ready");
+    }
+
+    vi.mocked(fetch).mockClear();
+    await expect(bulkUpdateOrderStatus(bulkIds, "ready")).rejects.toBeInstanceOf(
+      RateLimitError,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe("StatusPro admin routes", () => {
@@ -306,6 +323,9 @@ describe("StatusPro admin routes", () => {
         body: empty,
       })));
     expect(missingIds.status).toBe(400);
+    await expect(missingIds.json()).resolves.toMatchObject({
+      error: "No orders selected",
+    });
 
     const noStatus = new FormData();
     noStatus.set("ids", "1");
@@ -314,6 +334,19 @@ describe("StatusPro admin routes", () => {
         body: noStatus,
       })));
     expect(missingStatus.status).toBe(400);
+
+    const junk = new FormData();
+    junk.set("ids", "x,nope");
+    junk.set("status_code", "ready");
+    const invalidIds = await updateStatusAction(routeArgs(new Request("https://app.test/api/update-status", {
+        method: "POST",
+        body: junk,
+      })));
+    expect(invalidIds.status).toBe(400);
+    await expect(invalidIds.json()).resolves.toMatchObject({
+      error: "No valid order IDs",
+    });
+    expect(prismaMock.order.count).not.toHaveBeenCalled();
   });
 
   it("scopes viable statuses to the session shop", async () => {
@@ -384,5 +417,15 @@ describe("StatusPro inbound webhook", () => {
       }), { token: "hook-token" }));
     expect(ok.status).toBe(200);
     expect(prismaMock.order.updateMany).toHaveBeenCalled();
+  });
+
+  it("200-acks a parseable body that is not a StatusPro payload so they do not retry", async () => {
+    const empty = await ospWebhookAction(routeArgs(new Request("https://app.test/api/webhooks/order-status-pro/hook-token", {
+        method: "POST",
+        body: "{}",
+      }), { token: "hook-token" }));
+    expect(empty.status).toBe(200);
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.orderImportPending.upsert).not.toHaveBeenCalled();
   });
 });

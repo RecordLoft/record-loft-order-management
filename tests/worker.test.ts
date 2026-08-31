@@ -34,8 +34,10 @@ vi.mock("../webhooks/queue.server", () => ({
   releaseWebhookWork,
 }));
 
+import { closeDb } from "../app/db.server";
 import {
   allowedTopicsFromEnv,
+  drainAndExit,
   handlePush,
   handleWorkerRequest,
   releaseClaimedWork,
@@ -274,6 +276,30 @@ describe("handlePush", () => {
     expect(res.statusCode).toBe(200);
     expect(tryEnqueueWebhookWork).toHaveBeenCalled();
   });
+
+  it("ack-drops topics outside ALLOWED_TOPICS", async () => {
+    const previous = process.env.ALLOWED_TOPICS;
+    process.env.ALLOWED_TOPICS = "orders/create";
+    try {
+      const res = mockRes();
+      await handlePush(requestFrom(productPush) as never, res as never);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({
+        status: "ignored",
+        reason: "topic products/update not allowed",
+      });
+      expect(recordAckDrop).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "topic products/update not allowed" }),
+      );
+      expect(tryEnqueueWebhookWork).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ALLOWED_TOPICS;
+      } else {
+        process.env.ALLOWED_TOPICS = previous;
+      }
+    }
+  });
 });
 
 describe("handleWorkerRequest", () => {
@@ -329,6 +355,25 @@ describe("handleWorkerRequest", () => {
     );
     expect(missing.statusCode).toBe(404);
   });
+
+  it("accepts Pub/Sub pushes on /pubsub", async () => {
+    tryEnqueueWebhookWork.mockResolvedValue({ row: { id: "1" }, error: null });
+    claimWebhookWork.mockResolvedValue(true);
+    processWebhookWork.mockResolvedValue({
+      status: "success",
+      outcome: "completed",
+      detail: "updated",
+    });
+    const res = mockRes();
+    handleWorkerRequest(
+      requestFrom(productPush, { method: "POST", url: "/pubsub" }) as never,
+      res as never,
+    );
+    await vi.waitFor(() => {
+      expect(res.statusCode).toBe(200);
+    });
+    expect(res.body).toMatchObject({ status: "completed" });
+  });
 });
 
 describe("releaseClaimedWork", () => {
@@ -355,5 +400,33 @@ describe("releaseClaimedWork", () => {
   it("no-ops when nothing is claimed", async () => {
     await releaseClaimedWork();
     expect(releaseWebhookWork).not.toHaveBeenCalled();
+  });
+});
+
+describe("drainAndExit", () => {
+  beforeEach(() => {
+    workerState.inFlight = 0;
+    vi.mocked(closeDb).mockResolvedValue(undefined);
+  });
+
+  it("closes the db and exits 0 when nothing is in flight", async () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    drainAndExit();
+    await vi.waitFor(() => {
+      expect(closeDb).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(0);
+    });
+    exit.mockRestore();
+  });
+
+  it("exits 1 when the drain deadline passes with work still in flight", async () => {
+    workerState.inFlight = 1;
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+    drainAndExit(Date.now() - 1);
+    await vi.waitFor(() => {
+      expect(closeDb).toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+    exit.mockRestore();
   });
 });

@@ -110,6 +110,30 @@ describe("republishWebhookFailures", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("selects failed and stale processing rows, not ack_drop", async () => {
+    prismaMock.webhookFailure.findMany.mockResolvedValue([]);
+    await republishWebhookFailures(shop);
+    expect(prismaMock.webhookFailure.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          shop,
+          handler: { not: WebhookFailureHandler.ack_drop },
+          OR: [
+            { status: WebhookFailureStatus.failed },
+            {
+              status: WebhookFailureStatus.processing,
+              lastAttemptAt: null,
+            },
+            {
+              status: WebhookFailureStatus.processing,
+              lastAttemptAt: { lte: expect.any(Date) },
+            },
+          ],
+        },
+      }),
+    );
+  });
+
   it("publishes by topic and resets attempts", async () => {
     prismaMock.webhookFailure.findMany.mockResolvedValue([
       {
@@ -195,5 +219,31 @@ describe("republishWebhookFailures", () => {
     await expect(republishWebhookFailures(shop)).rejects.toThrow(
       "Failed to get a Pub/Sub token",
     );
+  });
+
+  it("does not reset attempts when Pub/Sub publish fails after a token", async () => {
+    prismaMock.webhookFailure.findMany.mockResolvedValue([
+      {
+        id: "a",
+        shop,
+        handler: WebhookFailureHandler.orders_create,
+        topic: "ORDERS_CREATE",
+        webhookId: null,
+        payload: { id: 2 },
+      },
+    ]);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "tok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("unavailable", { status: 500 }));
+
+    await expect(republishWebhookFailures(shop)).rejects.toThrow(
+      "Pub/Sub publish failed (500)",
+    );
+    expect(prismaMock.webhookFailure.updateMany).not.toHaveBeenCalled();
   });
 });

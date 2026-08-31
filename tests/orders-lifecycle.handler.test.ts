@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { prismaMock, upsertOrderImportPending } = vi.hoisted(() => ({
   prismaMock: {
-    order: { updateMany: vi.fn(), findUnique: vi.fn() },
+    order: { updateMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+    orderImportPending: { findUnique: vi.fn(), delete: vi.fn() },
   },
   upsertOrderImportPending: vi.fn(),
 }));
@@ -12,16 +13,25 @@ vi.mock("../app/db.server", () => ({
   default: prismaMock,
 }));
 
-vi.mock("../app/order-import-pending.server", () => ({
-  upsertOrderImportPending,
-}));
+vi.mock("../app/order-import-pending.server", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../app/order-import-pending.server")>();
+  return {
+    ...actual,
+    upsertOrderImportPending,
+  };
+});
 
+import { applyOrderImportPending } from "../app/order-import-pending.server";
 import {
   handleOrdersCancelled,
   handleOrdersFulfilled,
   handleRefundsCreate,
   isFullOrderRefund,
 } from "../webhooks/orders-lifecycle.handler.server";
+import ordersCancelledFixture from "./fixtures/shopify-orders-cancelled.json";
+import ordersFulfilledFixture from "./fixtures/shopify-orders-fulfilled.json";
+import refundsCreateFixture from "./fixtures/shopify-refunds-create.json";
 
 const fullRefundPayload = {
   id: 55,
@@ -43,12 +53,9 @@ describe("handleOrdersCancelled", () => {
   });
 
   it("sets cancelledAt on an existing order", async () => {
-    await expect(
-      handleOrdersCancelled({
-        id: 9001,
-        cancelled_at: "2026-08-01T12:00:00.000Z",
-      }),
-    ).resolves.toEqual({ outcome: "completed", detail: "cancelled" });
+    await expect(handleOrdersCancelled(ordersCancelledFixture)).resolves.toEqual(
+      { outcome: "completed", detail: "cancelled" },
+    );
     expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
       where: { id: 9001n },
       data: { cancelledAt: new Date("2026-08-01T12:00:00.000Z") },
@@ -84,12 +91,9 @@ describe("handleOrdersFulfilled", () => {
   });
 
   it("sets fulfilledAt on an existing order", async () => {
-    await expect(
-      handleOrdersFulfilled({
-        id: 9001,
-        updated_at: "2026-08-02T12:00:00.000Z",
-      }),
-    ).resolves.toEqual({ outcome: "completed", detail: "fulfilled" });
+    await expect(handleOrdersFulfilled(ordersFulfilledFixture)).resolves.toEqual(
+      { outcome: "completed", detail: "fulfilled" },
+    );
     expect(prismaMock.order.updateMany).toHaveBeenCalledWith({
       where: { id: 9001n },
       data: { fulfilledAt: new Date("2026-08-02T12:00:00.000Z") },
@@ -145,6 +149,45 @@ describe("isFullOrderRefund", () => {
       isFullOrderRefund(fullRefundPayload, [{ id: 11n, quantity: 1 }]),
     ).toBe(true);
   });
+
+  it("uses payload line originals when the order is not imported yet", () => {
+    expect(
+      isFullOrderRefund({
+        refund_line_items: [
+          {
+            line_item_id: 11,
+            quantity: 1,
+            line_item: { id: 11, quantity: 1 },
+          },
+          {
+            line_item_id: 12,
+            quantity: 2,
+            line_item: { id: 12, quantity: 2 },
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isFullOrderRefund({
+        refund_line_items: [
+          {
+            line_item_id: 11,
+            quantity: 1,
+            line_item: { id: 11, quantity: 2 },
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("reads financial_status from a nested order object", () => {
+    expect(
+      isFullOrderRefund({ order: { financial_status: "refunded" } }),
+    ).toBe(true);
+    expect(
+      isFullOrderRefund({ order: { financial_status: "partially_refunded" } }),
+    ).toBe(false);
+  });
 });
 
 describe("handleRefundsCreate", () => {
@@ -157,7 +200,7 @@ describe("handleRefundsCreate", () => {
   });
 
   it("sets refundedAt only for a full refund", async () => {
-    await expect(handleRefundsCreate(fullRefundPayload)).resolves.toEqual({
+    await expect(handleRefundsCreate(refundsCreateFixture)).resolves.toEqual({
       outcome: "completed",
       detail: "refunded",
     });
@@ -196,5 +239,68 @@ describe("handleRefundsCreate", () => {
       code: "invalid_payload",
       retry: false,
     });
+  });
+});
+
+describe("applyOrderImportPending", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.order.update.mockResolvedValue({});
+    prismaMock.orderImportPending.delete.mockResolvedValue({});
+  });
+
+  it("copies cancel, refund, fulfill, and OSP fields then deletes the pending row", async () => {
+    const cancelledAt = new Date("2026-08-01T12:00:00.000Z");
+    const refundedAt = new Date("2026-08-01T13:00:00.000Z");
+    const fulfilledAt = new Date("2026-08-01T14:00:00.000Z");
+    const ospStatusSyncedAt = new Date("2026-08-01T15:00:00.000Z");
+    prismaMock.orderImportPending.findUnique.mockResolvedValue({
+      orderId: 9001n,
+      cancelledAt,
+      refundedAt,
+      fulfilledAt,
+      ospStatusName: "Ready",
+      ospStatusSyncedAt,
+    });
+
+    await expect(applyOrderImportPending(9001n)).resolves.toBe(true);
+    expect(prismaMock.order.update).toHaveBeenCalledWith({
+      where: { id: 9001n },
+      data: {
+        cancelledAt,
+        refundedAt,
+        fulfilledAt,
+        ospStatusName: "Ready",
+        ospStatusSyncedAt,
+      },
+    });
+    expect(prismaMock.orderImportPending.delete).toHaveBeenCalledWith({
+      where: { orderId: 9001n },
+    });
+  });
+
+  it("deletes an empty pending row without updating the order", async () => {
+    prismaMock.orderImportPending.findUnique.mockResolvedValue({
+      orderId: 9001n,
+      cancelledAt: null,
+      refundedAt: null,
+      fulfilledAt: null,
+      ospStatusName: null,
+      ospStatusSyncedAt: null,
+    });
+
+    await expect(applyOrderImportPending(9001n)).resolves.toBe(true);
+    expect(prismaMock.order.update).not.toHaveBeenCalled();
+    expect(prismaMock.orderImportPending.delete).toHaveBeenCalledWith({
+      where: { orderId: 9001n },
+    });
+  });
+
+  it("returns false when there is no pending row", async () => {
+    prismaMock.orderImportPending.findUnique.mockResolvedValue(null);
+
+    await expect(applyOrderImportPending(9001n)).resolves.toBe(false);
+    expect(prismaMock.order.update).not.toHaveBeenCalled();
+    expect(prismaMock.orderImportPending.delete).not.toHaveBeenCalled();
   });
 });

@@ -9,8 +9,23 @@ declare global {
   var __recordLoftPrisma: PrismaClient | undefined;
 }
 
+function usesAivenSsl(url: URL): boolean {
+  const sslMode = url.searchParams.get("sslmode");
+  return (
+    sslMode === "require" ||
+    sslMode === "verify-full" ||
+    sslMode === "verify-ca" ||
+    url.searchParams.has("sslrootcert")
+  );
+}
+
 function pgPoolConfig() {
-  const url = new URL(process.env.DATABASE_URL!);
+  const raw = process.env.DATABASE_URL;
+  if (!raw) {
+    throw new Error("DATABASE_URL is not set");
+  }
+  const url = new URL(raw);
+  const withAivenSsl = usesAivenSsl(url);
   // connectionString ssl* params replace any explicit `ssl` object in node-pg.
   // Strip them so we can verify against the bundled Aiven project CA.
   url.searchParams.delete("sslmode");
@@ -19,17 +34,8 @@ function pgPoolConfig() {
   url.searchParams.delete("sslkey");
   url.searchParams.delete("uselibpqcompat");
 
-  const ca = fs.readFileSync(
-    path.join(process.cwd(), "certs/aiven-ca.pem"),
-    "utf8",
-  );
-
-  return {
+  const base = {
     connectionString: url.toString(),
-    ssl: {
-      ca,
-      rejectUnauthorized: true,
-    },
     // One connection per process. Cloud Run is concurrency=1 / max-instances=2
     // so the worker stays at two Aiven clients. Netlify admin instances are
     // the same: a pool >1 here would multiply by however many are warm.
@@ -38,6 +44,24 @@ function pgPoolConfig() {
     // makes the next request pay a fresh TCP + TLS handshake.
     idleTimeoutMillis: 300_000,
     connectionTimeoutMillis: 20_000,
+  };
+
+  // Local / Testcontainers URLs have no sslmode. Aiven always sets require.
+  if (!withAivenSsl) {
+    return base;
+  }
+
+  const ca = fs.readFileSync(
+    path.join(process.cwd(), "certs/aiven-ca.pem"),
+    "utf8",
+  );
+
+  return {
+    ...base,
+    ssl: {
+      ca,
+      rejectUnauthorized: true,
+    },
   };
 }
 

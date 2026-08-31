@@ -418,6 +418,32 @@ describe("enqueueWebhookWork", () => {
     });
   });
 
+  it("does not reset attempts or steal a live processing lease", async () => {
+    await enqueueWebhookWork(work);
+    const upsert = prismaMock.webhookFailure.upsert.mock.calls[0]?.[0] as {
+      update: Record<string, unknown>;
+    };
+    expect(upsert.update).toEqual({
+      topic: work.topic,
+      resourceGid: undefined,
+      webhookId: undefined,
+      payload: work.payload,
+    });
+    expect(upsert.update).not.toHaveProperty("status");
+    expect(upsert.update).not.toHaveProperty("attempts");
+    expect(prismaMock.webhookFailure.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.webhookFailure.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        status: WebhookFailureStatus.failed,
+      }),
+      data: {
+        status: WebhookFailureStatus.pending,
+        attempts: 0,
+        completedAt: null,
+      },
+    });
+  });
+
   it("falls back to update on a unique-key race", async () => {
     const race = Object.assign(new Error("unique"), { code: "P2002" });
     prismaMock.webhookFailure.upsert.mockRejectedValueOnce(race);

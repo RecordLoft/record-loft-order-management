@@ -1,0 +1,52 @@
+{
+  "id": 9001,
+  "admin_graphql_api_id": "gid://shopify/Order/9001",
+  "order_number": 101,
+  "name": "#101",
+  "total_price": "32.00",
+  "subtotal_price": "32.00",
+  "currency": "USD",
+  "financial_status": "paid",
+  "fulfillment_status": null,
+  "source_name": "web",
+  "phone": null,
+  "updated_at": "2026-08-03T16:00:00.000Z",
+  "created_at": "2026-08-03T16:00:00.000Z",
+  "cancelled_at": null,
+  "shipping_lines": [],
+  "fulfillments": [],
+  "refunds": [],
+  "line_items": [
+    {
+      "id": 11,
+      "admin_graphql_api_id": "gid://shopify/LineItem/11",
+      "product_id": 55,
+      "variant_id": 77,
+      "title": "Kind of Blue",
+      "name": "Kind of Blue",
+      "quantity": 1,
+      "price": "32.00",
+      "sku": "KOB",
+      "vendor": "Record Loft",
+      "fulfillment_status": null,
+      "properties": [{ "name": "Artist", "value": "Miles" }]
+    }
+  ],
+  "customer": {
+    "id": 3,
+    "email": "buyer@example.com",
+    "first_name": "Ada",
+    "last_name": "Lovelace",
+    "phone": "555-0100"
+  },
+  "billing_address": {
+    "first_name": "Ada",
+    "last_name": "Lovelace",
+    "phone": null
+  },
+  "shipping_address": {
+    "first_name": "Ada",
+    "last_name": "Lovelace",
+    "phone": "555-0199"
+  }
+}

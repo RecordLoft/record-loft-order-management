@@ -23,6 +23,7 @@ import {
   isVisiblePropertyKey,
   matchingOrderIds,
   parseProperties,
+  parseRecordPlanetView,
   recordPlanetClosedLabel,
   recordPlanetOrderWhere,
   toIlikePattern,
@@ -75,6 +76,13 @@ describe("Record Planet property helpers", () => {
         fulfilledAt: new Date("2026-08-02T00:00:00Z"),
       }),
     ).toBe("Cancelled");
+  });
+
+  it("parses the list view query param", () => {
+    expect(parseRecordPlanetView(null)).toBe("active");
+    expect(parseRecordPlanetView("pending")).toBe("active");
+    expect(parseRecordPlanetView("closed")).toBe("closed");
+    expect(parseRecordPlanetView("all")).toBe("all");
   });
 });
 
@@ -258,5 +266,53 @@ describe("Record Planet loader", () => {
     expect(result.customerGroups[0]?.orders[1]?.status).toEqual({ name: "Ready" });
     expect(result.view).toBe("active");
     expect(result.customerGroups[0]?.orders[0]?.closedLabel).toBeNull();
+  });
+
+  it("applies the closed view filter from the query string", async () => {
+    prismaMock.order.findMany.mockResolvedValue([]);
+
+    const result = await loader(
+      routeArgs(new Request("https://app.test/app/record-planet?view=closed")),
+    );
+
+    expect(result.view).toBe("closed");
+    expect(result.searchQuery).toBe("");
+    expect(prismaMock.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          shop,
+          deliveryMethod: "recordPlanet",
+          OR: [
+            { cancelledAt: { not: null } },
+            { refundedAt: { not: null } },
+            { fulfilledAt: { not: null } },
+          ],
+        },
+      }),
+    );
+  });
+
+  it("searches across all views when q and view=all are set", async () => {
+    prismaMock.$queryRaw.mockResolvedValue([]);
+    prismaMock.order.findMany.mockResolvedValue([]);
+
+    const result = await loader(
+      routeArgs(
+        new Request("https://app.test/app/record-planet?q=miles&view=all"),
+      ),
+    );
+
+    expect(result.view).toBe("all");
+    expect(result.searchQuery).toBe("miles");
+    expect(prismaMock.$queryRaw).toHaveBeenCalled();
+    expect(prismaMock.order.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          shop,
+          deliveryMethod: "recordPlanet",
+          id: { in: [BigInt(-1)] },
+        },
+      }),
+    );
   });
 });

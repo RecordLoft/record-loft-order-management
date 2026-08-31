@@ -19,6 +19,7 @@
     "typecheck": "react-router typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "prepare": "husky",
     "worker": "tsx webhooks/worker.server.ts"
   },
@@ -53,6 +54,7 @@
     "@shopify/api-codegen-preset": "^2.0.0",
     "@shopify/app-bridge-types": "^0.7.0",
     "@shopify/polaris-types": "^1.0.7",
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/eslint": "^9.6.1",
     "@types/node": "^25.5.2",
     "@types/pg": "^8.21.0",
@@ -69,6 +71,7 @@
     "graphql-config": "^5.1.1",
     "husky": "^9.1.7",
     "prettier": "^3.8.3",
+    "testcontainers": "^12.1.0",
     "typescript": "^5.9.3",
     "vite": "^6.3.6",
     "vitest": "3.2.4"

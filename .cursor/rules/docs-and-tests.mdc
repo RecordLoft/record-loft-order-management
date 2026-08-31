@@ -11,4 +11,5 @@ This repo already has architecture docs and tests. Use them. Do not ignore them.
 - Tests live in `tests/` (`vitest.config.ts`). Do not start a second tree or colocate server/worker/route tests.
 - A behavior change is incomplete until the matching test file and the doc that describes that path are updated.
 - Mock Prisma, Shopify, and GCP. Do not require a live Aiven or Pub/Sub for `yarn test`.
+- SQL/unique-key contracts: `yarn test:integration` (Testcontainers Postgres, Docker). Still mock Shopify / GCP / StatusPro HTTP.
 - Polaris UI and Shopify-hosted `extensions/` are not in the suite. Do not add Playwright unless the user asks for E2E.

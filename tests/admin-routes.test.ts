@@ -110,6 +110,38 @@ describe("Webhook DLQ admin", () => {
       resourceId: "99",
       leaseExpired: true,
     });
+    expect(data.view).toBe("failed");
+  });
+
+  it("filters the DLQ list by status=retrying and status=all", async () => {
+    const retrying = await webhooksAdminLoader(
+      routeArgs(new Request("https://app.test/app/webhooks-admin?status=retrying")),
+    );
+    expect(retrying.view).toBe("retrying");
+    expect(listWebhookFailures).toHaveBeenCalledWith(shop, {
+      statuses: ["pending", "processing"],
+      limit: 100,
+    });
+
+    listWebhookFailures.mockClear();
+    const all = await webhooksAdminLoader(
+      routeArgs(new Request("https://app.test/app/webhooks-admin?status=all")),
+    );
+    expect(all.view).toBe("all");
+    expect(listWebhookFailures).toHaveBeenCalledWith(shop, {
+      statuses: undefined,
+      limit: 100,
+    });
+
+    listWebhookFailures.mockClear();
+    const fallback = await webhooksAdminLoader(
+      routeArgs(new Request("https://app.test/app/webhooks-admin?status=nope")),
+    );
+    expect(fallback.view).toBe("failed");
+    expect(listWebhookFailures).toHaveBeenCalledWith(shop, {
+      statuses: ["failed"],
+      limit: 100,
+    });
   });
 
   it("redrives one row, all rows, and reports skip reasons", async () => {
