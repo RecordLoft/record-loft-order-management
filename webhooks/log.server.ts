@@ -70,13 +70,65 @@ function jsonValue(key: string, value: unknown): unknown {
   return value;
 }
 
+/** Field order in the Log Explorer summary line (jsonPayload.message). */
+const SUMMARY_FIELD_ORDER = [
+  "topic",
+  "shop",
+  "handler",
+  "resourceId",
+  "messageId",
+  "source",
+  "outcome",
+  "detail",
+  "code",
+  "retry",
+  "reason",
+  "step",
+  "sourceName",
+  "productIds",
+  "shippingLineCount",
+  "fulfillmentOrderId",
+  "status",
+  "statuses",
+  "alreadyInProgress",
+  "port",
+  "topics",
+  "latencyMs",
+] as const;
+
+function formatSummaryValue(value: unknown): string {
+  if (Array.isArray(value)) return value.join(",");
+  return String(value);
+}
+
+/** What you see in Log Explorer before opening the JSON. */
+export function summarizeCloudLogMessage(fields: CloudLogFields): string {
+  const { message, component, error, ...rest } = fields;
+  const prefix = component ? `[${component}] ` : "";
+  const parts = [message];
+  for (const key of SUMMARY_FIELD_ORDER) {
+    const value = rest[key];
+    if (value === undefined) continue;
+    parts.push(`${key}=${formatSummaryValue(jsonValue(key, value))}`);
+  }
+  if (error instanceof Error) {
+    parts.push(`error=${error.message}`);
+  } else if (error !== undefined) {
+    parts.push(`error=${error}`);
+  }
+  return `${prefix}${parts.join(" ")}`;
+}
+
 export function formatCloudLog(
   severity: CloudLogSeverity,
   fields: CloudLogFields,
   options?: { traceHeader?: string | null; projectId?: string },
 ): Record<string, unknown> {
-  const { message, component, error, ...rest } = fields;
-  const entry: Record<string, unknown> = { severity, message };
+  const { message: _message, component, error, ...rest } = fields;
+  const entry: Record<string, unknown> = {
+    severity,
+    message: summarizeCloudLogMessage(fields),
+  };
   if (component) entry.component = component;
 
   for (const [key, value] of Object.entries(rest)) {

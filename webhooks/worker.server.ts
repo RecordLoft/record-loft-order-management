@@ -200,7 +200,7 @@ async function handlePushInner(req: IncomingMessage, res: ServerResponse) {
   if (!claimed) {
     log.info({
       component: "pubsub-worker",
-      message: "busy",
+      message: "row already claimed",
       topic,
       shop,
       resourceId: work.resourceId,
@@ -300,7 +300,7 @@ export function handleWorkerRequest(
           () => {
             log.error({
               component: "pubsub-worker",
-              message: "health db failed",
+              message: "health check failed: database unreachable",
               error,
             });
           },
@@ -326,7 +326,7 @@ export function handleWorkerRequest(
           () => {
             log.error({
               component: "pubsub-worker",
-              message: "unhandled",
+              message: "unhandled error",
               error,
             });
           },

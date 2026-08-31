@@ -8,6 +8,7 @@ import {
   log,
   parseCloudTraceHeader,
   runWithLogContext,
+  summarizeCloudLogMessage,
   traceHeaderFromRequest,
 } from "../webhooks/log.server";
 
@@ -38,6 +39,24 @@ describe("traceHeaderFromRequest", () => {
   });
 });
 
+describe("summarizeCloudLogMessage", () => {
+  it("puts component and key fields in the Log Explorer summary line", () => {
+    expect(
+      summarizeCloudLogMessage({
+        message: "webhook completed",
+        component: "pubsub-worker",
+        topic: "products/update",
+        shop: "record-loft.myshopify.com",
+        resourceId: 7n,
+        outcome: "completed",
+        latencyMs: 12,
+      }),
+    ).toBe(
+      "[pubsub-worker] webhook completed topic=products/update shop=record-loft.myshopify.com resourceId=7 outcome=completed latencyMs=12",
+    );
+  });
+});
+
 describe("formatCloudLog", () => {
   it("maps severity, message, and custom fields", () => {
     expect(
@@ -52,7 +71,8 @@ describe("formatCloudLog", () => {
       }),
     ).toEqual({
       severity: "INFO",
-      message: "webhook completed",
+      message:
+        "[pubsub-worker] webhook completed topic=products/update shop=record-loft.myshopify.com resourceId=7 outcome=completed latencyMs=12",
       component: "pubsub-worker",
       topic: "products/update",
       shop: "record-loft.myshopify.com",
@@ -69,7 +89,7 @@ describe("formatCloudLog", () => {
       error,
     });
     expect(entry.severity).toBe("ERROR");
-    expect(entry.message).toBe("ack-drop persist failed");
+    expect(entry.message).toBe("ack-drop persist failed error=db down");
     expect(entry.stack_trace).toEqual(expect.stringContaining("db down"));
     expect(entry["@type"]).toBe(ERROR_REPORTING_TYPE);
     expect(entry).not.toHaveProperty("error");
@@ -83,7 +103,7 @@ describe("formatCloudLog", () => {
       }),
     ).toMatchObject({
       severity: "ERROR",
-      message: "enqueue failed",
+      message: "enqueue failed error=db down",
       error: "db down",
     });
   });
@@ -147,7 +167,7 @@ describe("log", () => {
     expect(info).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(info.mock.calls[0]?.[0]))).toEqual({
       severity: "INFO",
-      message: "listening",
+      message: "[pubsub-worker] listening port=8080",
       component: "pubsub-worker",
       port: 8080,
     });

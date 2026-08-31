@@ -239,7 +239,9 @@ describe("handlePush", () => {
       expect.arrayContaining([
         expect.objectContaining({
           severity: "INFO",
-          message: "webhook completed",
+          message: expect.stringMatching(
+            /^\[pubsub-worker\] webhook completed topic=products\/update shop=record-loft\.myshopify\.com resourceId=7 messageId=m-1 source=shopify-publish outcome=completed detail=updated latencyMs=\d+$/,
+          ),
           component: "pubsub-worker",
           topic: "products/update",
           shop: "record-loft.myshopify.com",

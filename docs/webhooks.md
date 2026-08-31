@@ -154,7 +154,7 @@ Wait a few minutes, edit a product in admin, then in Log Explorer filter `jsonPa
 
 Cloud Run writes one JSON object per line to stdout/stderr. The logging agent maps reserved fields (`severity`, `message`, `logging.googleapis.com/trace`) onto the LogEntry; everything else is `jsonPayload`. There is no Logging SDK — see [Cloud Run structured logs](https://cloud.google.com/run/docs/logging).
 
-Typical fields: `component` (`pubsub-worker`, `webhook-queue`, `orders-create`, `shopify-fulfillment`), `topic`, `shop`, `resourceId`, `messageId`, `source` (`shopify-publish` or `admin-retry`), `outcome`, `latencyMs`, `code`, `reason`. Request logs nest together when the worker copies `X-Cloud-Trace-Context` into `logging.googleapis.com/trace` as `projects/record-loft/traces/{traceId}`.
+Typical fields: `component` (`pubsub-worker`, `webhook-queue`, `orders-create`, `shopify-fulfillment`), `topic`, `shop`, `resourceId`, `messageId`, `source` (`shopify-publish` or `admin-retry`), `outcome`, `latencyMs`, `code`, `reason`. `message` is the Log Explorer list line: `[component] what happened` plus those fields as `key=value`, so you can scan without opening the JSON. Request logs nest together when the worker copies `X-Cloud-Trace-Context` into `logging.googleapis.com/trace` as `projects/record-loft/traces/{traceId}`.
 
 ```
 resource.type="cloud_run_revision"
