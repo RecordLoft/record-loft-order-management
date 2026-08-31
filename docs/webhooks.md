@@ -39,7 +39,7 @@ Resolve the current URL:
 gcloud run services describe shopify-webhooks --project=record-loft --region=us-central1 --format='value(status.url)'
 ```
 
-`concurrency=1`, `max-instances=2`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch). Push subscriptions `shopify-products-push` and `shopify-orders-push` use `ackDeadlineSeconds=60` (same as the Cloud Run timeout) so a slow handler is not redelivered mid-request.
+`concurrency=1`, `max-instances=2`, `--cpu-boost`. Extra messages wait in Pub/Sub. That is the Aiven backpressure (not a Netlify 5-job batch). Push subscriptions `shopify-products-push` and `shopify-orders-push` use `ackDeadlineSeconds=60` (same as the Cloud Run timeout) so a slow handler is not redelivered mid-request. The image runs compiled `dist/worker.js` (not `tsx`). Session storage on Cloud Run probes Aiven twice at 200ms, not 4×3s. The first request on an instance logs `cold=true`. There is no `--min-instances`; scale-from-zero still happens after idle, which is the remaining p99 lever.
 
 A successful product description write can fire another `products/update`. Coalesce + “skip if HTML unchanged” limit the echo.
 
@@ -154,7 +154,7 @@ Wait a few minutes, edit a product in admin, then in Log Explorer filter `jsonPa
 
 Cloud Run writes one JSON object per line to stdout/stderr. The logging agent maps reserved fields (`severity`, `message`, `logging.googleapis.com/trace`) onto the LogEntry; everything else is `jsonPayload`. There is no Logging SDK — see [Cloud Run structured logs](https://cloud.google.com/run/docs/logging).
 
-Typical fields: `component` (`pubsub-worker`, `webhook-queue`, `orders-create`, `shopify-fulfillment`), `topic`, `shop`, `resourceId`, `messageId`, `source` (`shopify-publish` or `admin-retry`), `outcome`, `latencyMs`, `code`, `reason`. `message` is the Log Explorer list line: `[component] what happened` plus those fields as `key=value`, so you can scan without opening the JSON. Request logs nest together when the worker copies `X-Cloud-Trace-Context` into `logging.googleapis.com/trace` as `projects/record-loft/traces/{traceId}`.
+Typical fields: `component` (`pubsub-worker`, `webhook-queue`, `orders-create`, `shopify-fulfillment`), `topic`, `shop`, `resourceId`, `messageId`, `source` (`shopify-publish` or `admin-retry`), `outcome`, `cold` (first request on this instance), `latencyMs`, `code`, `reason`. `message` is the Log Explorer list line: `[component] what happened` plus those fields as `key=value`, so you can scan without opening the JSON. Request logs nest together when the worker copies `X-Cloud-Trace-Context` into `logging.googleapis.com/trace` as `projects/record-loft/traces/{traceId}`.
 
 ```
 resource.type="cloud_run_revision"
@@ -169,4 +169,6 @@ jsonPayload.source="admin-retry"
 
 jsonPayload.shop="record-loft.myshopify.com"
 jsonPayload.resourceId="7"
+
+jsonPayload.cold=true
 ```

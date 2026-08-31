@@ -72,7 +72,7 @@ echo "  GCP_DEPLOY_SA=${SA}"
 
 Also add **secrets** `DATABASE_URL` and `DIRECT_URL` (Aiven) so the migrate job can run `prisma migrate deploy` before Cloud Run updates.
 
-The first `gcloud run deploy` from Actions can take a minute. After that, image layers cache on the runner.
+The first `gcloud run deploy` from Actions can take a minute. After that, image layers cache on the runner. Deploy uses `--cpu-boost` (extra CPU only during startup; still request-based billing, no min instances). The image runs `node dist/worker.js`.
 
 ## Manual fallback
 
@@ -87,6 +87,7 @@ gcloud run deploy shopify-webhooks \
   --no-allow-unauthenticated \
   --concurrency=1 \
   --max-instances=2 \
+  --cpu-boost \
   --timeout=60 \
   --port=8080
 ```

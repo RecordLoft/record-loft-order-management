@@ -20,6 +20,7 @@ import {
   consumeColdStartFlag,
   msSince,
 } from "../app/request-timing.server";
+import { prismaSessionStorageRetryOptions } from "../app/session-storage-retry.server";
 import { loader as healthLoader } from "../app/routes/api.health";
 import { fetchAppPath, getSiteUrl } from "../netlify/lib/site-url";
 
@@ -163,5 +164,17 @@ describe("Netlify site URL helpers", () => {
     );
     const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("Authorization")).toBe("Bearer cron-secret");
+  });
+});
+
+describe("prismaSessionStorageRetryOptions", () => {
+  it("uses a short probe on Cloud Run and the long Aiven probe elsewhere", () => {
+    expect(prismaSessionStorageRetryOptions({ K_SERVICE: "shopify-webhooks" })).toEqual(
+      { connectionRetries: 2, connectionRetryIntervalMs: 200 },
+    );
+    expect(prismaSessionStorageRetryOptions({})).toEqual({
+      connectionRetries: 4,
+      connectionRetryIntervalMs: 3000,
+    });
   });
 });

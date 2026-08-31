@@ -8,6 +8,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { closeDb, prisma } from "../app/db.server";
+import { consumeColdStartFlag } from "../app/request-timing.server";
 import {
   ackDropContext,
   isAdminRetry,
@@ -214,6 +215,7 @@ async function handlePushInner(req: IncomingMessage, res: ServerResponse) {
   }
 
   workerState.claimedWork = work;
+  const cold = consumeColdStartFlag();
   let result: Awaited<ReturnType<typeof processWebhookWork>>;
   try {
     result = await processWebhookWork(work);
@@ -235,6 +237,7 @@ async function handlePushInner(req: IncomingMessage, res: ServerResponse) {
       source,
       outcome: result.outcome,
       detail: result.detail,
+      cold,
       latencyMs,
     });
     send(res, 200, { status: result.outcome, latencyMs });
@@ -253,6 +256,7 @@ async function handlePushInner(req: IncomingMessage, res: ServerResponse) {
     code: result.code,
     detail: result.message,
     retry: result.retry,
+    cold,
     latencyMs,
   });
   if (result.retry) {
@@ -354,14 +358,33 @@ export function drainAndExit(deadline = Date.now() + DRAIN_TIMEOUT_MS) {
 export function startWorker() {
   const server = createServer(handleWorkerRequest);
 
-  server.listen(PORT, "0.0.0.0", () => {
-    log.info({
-      component: "pubsub-worker",
-      message: "listening",
-      port: PORT,
-      topics: [...allowedTopicsFromEnv()],
+  const listen = () => {
+    server.listen(PORT, "0.0.0.0", () => {
+      log.info({
+        component: "pubsub-worker",
+        message: "listening",
+        port: PORT,
+        topics: [...allowedTopicsFromEnv()],
+      });
     });
-  });
+  };
+
+  void prisma
+    .$queryRaw`SELECT 1`
+    .then(() => {
+      log.info({
+        component: "pubsub-worker",
+        message: "database ready",
+      });
+    })
+    .catch((error: unknown) => {
+      log.error({
+        component: "pubsub-worker",
+        message: "startup database ping failed",
+        error,
+      });
+    })
+    .finally(listen);
 
   process.on("SIGTERM", () => {
     log.info({

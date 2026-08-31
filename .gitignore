@@ -13,6 +13,7 @@ node_modules
 /prisma/dev.sqlite-journal
 database.sqlite
 /generated
+/dist
 
 .env
 .env.*

@@ -141,5 +141,6 @@ jobs:
             --no-allow-unauthenticated \
             --concurrency=1 \
             --max-instances=2 \
+            --cpu-boost \
             --timeout=60 \
             --port=8080

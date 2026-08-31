@@ -54,7 +54,7 @@ See [webhooks/README.md](../webhooks/README.md).
 
 `queue.server.ts` coalesces work on `(shop, handler, resourceId)`, claims the row (`processing`, lease on `lastAttemptAt`), then runs the handler. Product and orders-create use `unauthenticated.admin(shop)`; cancel/refund/fulfill do not. A `processing` row older than 90 seconds can be claimed again or redriven. Success deletes the row. Failure increments `attempts`; after 5 failures, no session (product/create only), or a terminal error (`product_not_found`, non-retryable GraphQL `userErrors`) the row is `failed` and Pub/Sub is acked. Invalid / unknown messages are stored as `ack_drop` (HTTP 200 once persisted), each with a unique `resourceId` so distinct poison messages do not overwrite each other. If ack-drop persist fails, the worker returns 500 so Pub/Sub retries. SIGTERM releases the claimed row back to `pending`. `/app/webhooks-admin` is the DLQ; Redrive republishes via `app/webhook-retry-publish.server.ts` (not `ack_drop` rows; stale processing is allowed). Netlify does not run handlers.
 
-Cloud Run starts `webhooks/worker.server.ts` (plain `node:http`). `GET /` is liveness; `GET /health` pings Postgres. SIGTERM releases the claimed row and drains in-flight pushes (capped at 50s) before `closeDb()`. Push bodies over 2MB are ack-dropped after persist. The image still copies `app/` so the worker can load Prisma and the offline session. Worker, queue, and Cloud Run handlers write one JSON line per event (`severity`, `message`, `topic`, `shop`, `resourceId`, `outcome`, plus `logging.googleapis.com/trace` from `X-Cloud-Trace-Context`) so Log Explorer can filter `jsonPayload`. `message` is the list-line summary (`[component] what happened key=value`) — see [webhooks.md](webhooks.md#log-explorer).
+Cloud Run starts `webhooks/worker.server.ts` compiled to `dist/worker.js` (plain `node`). `GET /` is liveness; `GET /health` pings Postgres. SIGTERM releases the claimed row and drains in-flight pushes (capped at 50s) before `closeDb()`. Push bodies over 2MB are ack-dropped after persist. The image still copies `app/` so the worker can load Prisma and the offline session. Worker, queue, and Cloud Run handlers write one JSON line per event (`severity`, `message`, `topic`, `shop`, `resourceId`, `outcome`, `cold`, plus `logging.googleapis.com/trace` from `X-Cloud-Trace-Context`) so Log Explorer can filter `jsonPayload`. `message` is the list-line summary (`[component] what happened key=value`) — see [webhooks.md](webhooks.md#log-explorer).
 
 Record Planet queries filter by `session.shop` and default to **Active** (not cancelled, fully refunded, or fulfilled). `?view=closed` or `?view=all` includes those orders; search uses the same view. The storefront allows only one Record Planet item per cart, bought alone, so the list and search treat `lineItems[0]` as the product. `shopifyApp()` uses `AppDistribution.SingleMerchant`.
 
@@ -82,12 +82,12 @@ Shopify webhook JSON fixtures live in `tests/fixtures/` and are used by the hand
 | `shopify-fulfillment.test.ts` | Fulfillment-order paging and `REPORT_PROGRESS` |
 | `orders-lifecycle.handler.test.ts` | Cancel / refund / fulfill persist, pending import apply, Shopify fixtures |
 | `log.test.ts` | Cloud Run JSON log fields, severity, Error stack, trace header |
-| `worker.test.ts` | Cloud Run HTTP: ack, 500 retry, health, ALLOWED_TOPICS, `/pubsub`, shutdown |
+| `worker.test.ts` | Cloud Run HTTP: ack, 500 retry, health, ALLOWED_TOPICS, `/pubsub`, shutdown, `cold` |
 | `record-planet.test.ts` | Search helpers and `/app/record-planet` loader (`view` / `q`) |
 | `order-status-pro.test.ts` | StatusPro client, client throttle, cache, admin + inbound routes |
 | `webhook-retry-publish.test.ts` | Redrive to Pub/Sub (failed + stale processing; publish failure) |
 | `admin-routes.test.ts` | DLQ admin (`status` filter), pick list, HTTPS lifecycle |
-| `cron-health.test.ts` | Cron auth, `/api/health`, site URL |
+| `cron-health.test.ts` | Cron auth, `/api/health`, site URL, Cloud Run session-storage probe |
 | `warm-app.test.ts` | Netlify keep-warm |
 | `queue.integration.test.ts` | Coalesce, DLQ resurrect, live lease, 90s steal, ack-drop uniqueness |
 | `record-planet.integration.test.ts` | ILIKE escape, phone digits, Active/Closed/All, shop scope |

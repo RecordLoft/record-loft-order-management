@@ -107,6 +107,7 @@ describe("handlePush", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     workerState.claimedWork = null;
+    globalThis.__recordLoftInstanceWarmed = undefined;
     recordAckDrop.mockResolvedValue({});
     tryEnqueueWebhookWork.mockResolvedValue({ row: { id: "1" }, error: null });
     claimWebhookWork.mockResolvedValue(true);
@@ -242,7 +243,7 @@ describe("handlePush", () => {
         expect.objectContaining({
           severity: "INFO",
           message: expect.stringMatching(
-            /^\[pubsub-worker\] webhook completed topic=products\/update shop=record-loft\.myshopify\.com resourceId=7 messageId=m-1 source=shopify-publish outcome=completed detail=updated latencyMs=\d+$/,
+            /^\[pubsub-worker\] webhook completed topic=products\/update shop=record-loft\.myshopify\.com resourceId=7 messageId=m-1 source=shopify-publish outcome=completed detail=updated cold=true latencyMs=\d+$/,
           ),
           component: "pubsub-worker",
           topic: "products/update",
@@ -251,6 +252,7 @@ describe("handlePush", () => {
           messageId: "m-1",
           source: "shopify-publish",
           outcome: "completed",
+          cold: true,
           "logging.googleapis.com/trace":
             "projects/record-loft/traces/abc123def",
         }),

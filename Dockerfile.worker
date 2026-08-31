@@ -22,6 +22,8 @@ COPY app ./app
 COPY webhooks ./webhooks
 COPY certs ./certs
 
+RUN yarn worker:build
+
 EXPOSE 8080
 
-CMD ["yarn", "worker"]
+CMD ["node", "dist/worker.js"]

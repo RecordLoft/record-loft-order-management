@@ -93,6 +93,7 @@ const SUMMARY_FIELD_ORDER = [
   "alreadyInProgress",
   "port",
   "topics",
+  "cold",
   "latencyMs",
 ] as const;
 

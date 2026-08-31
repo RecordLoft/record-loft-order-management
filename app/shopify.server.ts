@@ -5,6 +5,7 @@ import {
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { prisma } from "./db.server";
+import { prismaSessionStorageRetryOptions } from "./session-storage-retry.server";
 import { PrismaSessionStorage } from "./shopify-app-session-storage-prisma.js";
 
 const shopify = shopifyApp({
@@ -15,8 +16,7 @@ const shopify = shopifyApp({
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma, {
-    connectionRetries: 4,
-    connectionRetryIntervalMs: 3000,
+    ...prismaSessionStorageRetryOptions(),
   }),
   distribution: AppDistribution.SingleMerchant,
   future: {
