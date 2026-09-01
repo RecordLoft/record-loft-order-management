@@ -4,7 +4,7 @@ Embedded Shopify app for Record Loft. Merchants use it inside admin for Record P
 
 | Surface | Host |
 |---|---|
-| Embedded admin, OAuth, StatusPro webhook, HTTPS lifecycle (`app/uninstalled`, `app/scopes_update`), hourly Aiven canary | **Netlify** (`application_url`) |
+| Embedded admin, OAuth, StatusPro webhook, HTTPS lifecycle (`app/uninstalled`, `app/scopes_update`), keep-warm every 5 min | **Netlify** (`application_url`) |
 | `products/create`, `products/update`, `orders/create` | **Pub/Sub → Cloud Run** |
 | Sessions, queued/failed jobs | **Aiven Postgres** |
 | Admin action extensions | **Shopify** (not this host) |

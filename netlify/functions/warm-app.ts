@@ -2,10 +2,9 @@ import type { Config } from "@netlify/functions";
 import { fetchAppPath } from "../lib/site-url";
 
 /**
- * Hourly Aiven activity canary. GETs `/api/health` (`Session.count`) so a
- * quiet stretch still counts as continuative activity. Aiven Free can power
- * off idle services after a warning email. Catalog/order work on Cloud Run
- * is the main activity. Two invocations per hour (scheduled job + health).
+ * Keep-warm: every 5 minutes GET `/api/health` so the React Router function
+ * already has `shopify.server` and a live Aiven connection. Two invocations
+ * per run (this job + health).
  */
 export default async () => {
   const started = Date.now();
@@ -19,17 +18,17 @@ export default async () => {
 
     if (!response.ok) {
       console.error(
-        `[aiven-canary] /api/health status=${response.status} latencyMs=${latencyMs} ${formatHealthFields(health)} body=${body.slice(0, 300)}`,
+        `[warm-app] /api/health status=${response.status} latencyMs=${latencyMs} ${formatHealthFields(health)} body=${body.slice(0, 300)}`,
       );
       return new Response(body, { status: response.status });
     }
 
     console.log(
-      `[aiven-canary] ok latencyMs=${latencyMs} ${formatHealthFields(health)}`,
+      `[warm-app] ok latencyMs=${latencyMs} ${formatHealthFields(health)}`,
     );
     return new Response(body, { status: 200 });
   } catch (error) {
-    console.error("[aiven-canary] failed:", error);
+    console.error("[warm-app] failed:", error);
     return new Response(String(error), { status: 500 });
   }
 };
@@ -56,5 +55,5 @@ function formatHealthFields(health: HealthBody | null): string {
 }
 
 export const config: Config = {
-  schedule: "0 * * * *",
+  schedule: "*/5 * * * *",
 };

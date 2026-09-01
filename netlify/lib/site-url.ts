@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-/** Site URL for scheduled functions that HTTP-call the RR app (Aiven canary). */
+/** Site URL for scheduled functions that HTTP-call the RR app (keep-warm). */
 export function getSiteUrl(): string {
   const raw =
     process.env.URL ||

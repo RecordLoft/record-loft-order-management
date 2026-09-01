@@ -11,6 +11,10 @@ vi.mock("../app/db.server", () => ({
   default: prismaMock,
 }));
 
+vi.mock("../app/shopify.server", () => ({
+  authenticate: { admin: vi.fn(), webhook: vi.fn() },
+}));
+
 import { authorizeCronRequest } from "../app/cron.server";
 import {
   consumeColdStartFlag,

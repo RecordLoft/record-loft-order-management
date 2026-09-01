@@ -16,7 +16,7 @@ tests/                  Vitest suite (`tests/**/*.test.ts`)
 vitest.config.ts        Node environment; excludes extensions
 docs/                   Architecture and deploy (keep in sync with code)
 .github/workflows/      CI (test + typecheck) and Cloud Run worker deploy
-netlify/functions/      aiven-canary (hourly GET /api/health)
+netlify/functions/      warm-app (keep-warm: GET /api/health every 5 min)
 prisma/                 Schema + migrations
 extensions/             Admin action extensions (Shopify-hosted)
 certs/aiven-ca.pem      TLS CA for Aiven
@@ -34,7 +34,7 @@ Behavior changes must update **docs and tests in the same change**. Read this fi
 | `/app/record-planet` | Record Planet orders, search, Active/Closed (cancelled, fully refunded, or fulfilled)/All view, status updates |
 | `/app/webhooks-admin` | Dead-letter queue for `WebhookFailure` (Redrive) |
 | `/auth/*` | OAuth |
-| `/api/health` | Aiven `Session.count` (`CRON_SECRET`). Hourly `aiven-canary` and manual curl. |
+| `/api/health` | Keep-warm target (`CRON_SECRET`): `Session.count` and load `shopify.server`. `warm-app` every 5 min, and manual curl. |
 | `/api/update-status`, `/api/viable-statuses`, `/api/order-status-sync` | StatusPro from the UI. All three use `authenticate.admin()`. Status update and viable-statuses also require the order to belong to `session.shop`. |
 | `/api/webhooks/order-status-pro/:token` | StatusPro inbound (not Shopify) |
 | `/webhooks/app/uninstalled` | HTTPS Shopify lifecycle |
@@ -88,7 +88,7 @@ Shopify webhook JSON fixtures live in `tests/fixtures/` and are used by the hand
 | `webhook-retry-publish.test.ts` | Redrive to Pub/Sub (failed + stale processing; publish failure) |
 | `admin-routes.test.ts` | DLQ admin (`status` filter), pick list, HTTPS lifecycle |
 | `cron-health.test.ts` | Cron auth, `/api/health`, site URL, Cloud Run session-storage probe |
-| `aiven-canary.test.ts` | Hourly Netlify canary → `/api/health` |
+| `warm-app.test.ts` | Netlify keep-warm every 5 min → `/api/health` |
 | `queue.integration.test.ts` | Coalesce, DLQ resurrect, live lease, 90s steal, ack-drop uniqueness |
 | `record-planet.integration.test.ts` | ILIKE escape, phone digits, Active/Closed/All, shop scope |
 | `order-import.integration.test.ts` | Cancel + OSP pending applied on create |
@@ -101,6 +101,6 @@ When you change a route, handler, queue rule, or StatusPro contract, add or upda
 
 ## Database
 
-Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify’s hourly canary plus a single admin user add a few more; that is well under the Free cap. There is no Aiven PgBouncer on Free.
+Aiven Postgres (`max_connections` is 20 on the current Free-sized instance). Prisma `max: 1` per process. Cloud Run is `concurrency=1` and `max-instances=2`, so the worker uses at most two connections. Netlify keep-warm plus a single admin user add a few more; that is well under the Free cap. There is no Aiven PgBouncer on Free.
 
-Aiven Free can power off a service with no continuative activity (notification first). Catalog/order handlers on Cloud Run are the main activity. `netlify/functions/aiven-canary.ts` is a quiet-hour backup: it GETs `/api/health`, which runs `Session.count`. The scheduled function and `/api/health` are two invocations per hour. Do not fold Prisma into the scheduled function just to cut that in half. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`. Aiven URLs set `sslmode=require` and use `certs/aiven-ca.pem`. Local and Testcontainers URLs without `sslmode` skip TLS.
+Aiven Free can power off a service with no continuative activity (notification first). Catalog/order handlers on Cloud Run are the main activity. `netlify/functions/warm-app.ts` GETs `/api/health` every 5 minutes so the admin SSR function stays warm (`shopify.server` + `Session.count`). That also counts as Aiven activity. The scheduled function and `/api/health` are two invocations per run. Do not fold Prisma into the scheduled function just to cut that in half. `Order` is indexed on `(shop, deliveryMethod)` for Record Planet list/search. `OrderImportPending` holds cancel/refund/fulfill/OSP status that arrived before `orders/create`. Aiven URLs set `sslmode=require` and use `certs/aiven-ca.pem`. Local and Testcontainers URLs without `sslmode` skip TLS.
