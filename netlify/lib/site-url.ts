@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-/** Resolve production site URL for scheduled functions that HTTP-call the RR app. */
+/** Site URL for scheduled functions that HTTP-call the RR app (Aiven canary). */
 export function getSiteUrl(): string {
   const raw =
     process.env.URL ||

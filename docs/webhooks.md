@@ -108,7 +108,7 @@ Pub/Sub retries on HTTP 500 while `attempts < 5` and the error is retryable. Exh
 
 ## Environment
 
-**Netlify** (app): `DATABASE_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, StatusPro + `CRON_SECRET` as used today, plus `GCP_PUBSUB_SA_JSON` so admin retry can publish.
+**Netlify** (app): `DATABASE_URL`, `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SCOPES`, `SHOPIFY_APP_URL`, StatusPro, `CRON_SECRET` (hourly `aiven-canary` → `/api/health`), plus `GCP_PUBSUB_SA_JSON` so admin retry can publish.
 
 **Cloud Run** (worker):
 

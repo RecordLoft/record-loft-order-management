@@ -3,15 +3,12 @@ import { prisma } from "../db.server";
 import { consumeColdStartFlag, msSince } from "../request-timing.server";
 import type { Route } from "./+types/api.health";
 
+/** Cron-gated Aiven probe (`Session.count`). Used by hourly `aiven-canary`. */
 export const loader = async ({ request }: Route.LoaderArgs) => {
   authorizeCronRequest(request);
 
   const totalStart = performance.now();
   const cold = consumeColdStartFlag();
-
-  // Load inside loader so React Router strips it from the client bundle,
-  // while still warming the same modules webhooks use.
-  await import("../shopify.server");
 
   const dbStart = performance.now();
   const sessionCount = await prisma.session.count();

@@ -2,9 +2,10 @@ import type { Config } from "@netlify/functions";
 import { fetchAppPath } from "../lib/site-url";
 
 /**
- * Keeps the React Router System function warm for the embedded admin.
- * Shopify product/order webhooks go to Pub/Sub → Cloud Run, not here.
- * Also keeps Aiven awake via /api/health's Session count.
+ * Hourly Aiven activity canary. GETs `/api/health` (`Session.count`) so a
+ * quiet stretch still counts as continuative activity. Aiven Free can power
+ * off idle services after a warning email. Catalog/order work on Cloud Run
+ * is the main activity. Two invocations per hour (scheduled job + health).
  */
 export default async () => {
   const started = Date.now();
@@ -18,17 +19,17 @@ export default async () => {
 
     if (!response.ok) {
       console.error(
-        `[warm-app] /api/health status=${response.status} latencyMs=${latencyMs} ${formatHealthFields(health)} body=${body.slice(0, 300)}`,
+        `[aiven-canary] /api/health status=${response.status} latencyMs=${latencyMs} ${formatHealthFields(health)} body=${body.slice(0, 300)}`,
       );
       return new Response(body, { status: response.status });
     }
 
     console.log(
-      `[warm-app] ok latencyMs=${latencyMs} ${formatHealthFields(health)}`,
+      `[aiven-canary] ok latencyMs=${latencyMs} ${formatHealthFields(health)}`,
     );
     return new Response(body, { status: 200 });
   } catch (error) {
-    console.error("[warm-app] failed:", error);
+    console.error("[aiven-canary] failed:", error);
     return new Response(String(error), { status: 500 });
   }
 };
@@ -55,5 +56,5 @@ function formatHealthFields(health: HealthBody | null): string {
 }
 
 export const config: Config = {
-  schedule: "*/5 * * * *",
+  schedule: "0 * * * *",
 };
