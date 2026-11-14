@@ -6,6 +6,7 @@ import {
   Card,
   Checkbox,
   IndexTable,
+  InlineStack,
   Layout,
   Link,
   Page,
@@ -190,6 +191,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       };
     }
 
+    if (intent === "delete") {
+      const id = String(form.get("id") ?? "");
+      // Only dead letters and stuck rows; pending/active rows are still retrying.
+      const { count } = await prisma.webhookFailure.deleteMany({
+        where: {
+          id,
+          shop: session.shop,
+          OR: [
+            { status: "failed" },
+            {
+              status: "processing",
+              OR: [
+                { lastAttemptAt: null },
+                { lastAttemptAt: { lte: processingLeaseCutoff() } },
+              ],
+            },
+          ],
+        },
+      });
+      if (count === 0) {
+        return {
+          ok: false,
+          message: "Record not found or still retrying; nothing deleted.",
+        };
+      }
+      return { ok: true, message: "Dead letter deleted." };
+    }
+
     if (intent === "redrive_all") {
       const { queued } = await republishWebhookFailures(session.shop);
       if (queued === 0) {
@@ -232,6 +261,10 @@ export default function WebhookDeadLettersPage() {
 
   const redrivingId =
     fetcher.state !== "idle" ? String(fetcher.formData?.get("id") ?? "") : "";
+  const deletingId =
+    fetcher.state !== "idle" && fetcher.formData?.get("intent") === "delete"
+      ? String(fetcher.formData?.get("id") ?? "")
+      : "";
   const redrivingAll =
     fetcher.state !== "idle" &&
     fetcher.formData?.get("intent") === "redrive_all";
@@ -374,7 +407,13 @@ export default function WebhookDeadLettersPage() {
                       job.handler !== "ack_drop" &&
                       (job.status === "failed" ||
                         (job.status === "processing" && job.leaseExpired));
-                    const busy = redrivingAll || redrivingId === job.id;
+                    const canDelete =
+                      job.status === "failed" ||
+                      (job.status === "processing" && job.leaseExpired);
+                    const busy =
+                      redrivingAll ||
+                      redrivingId === job.id ||
+                      deletingId === job.id;
 
                     return (
                       <IndexTable.Row
@@ -420,20 +459,47 @@ export default function WebhookDeadLettersPage() {
                           </Text>
                         </IndexTable.Cell>
                         <IndexTable.Cell>
-                          {canRedrive ? (
-                            <Button
-                              size="slim"
-                              loading={busy && redrivingId === job.id}
-                              disabled={busy}
-                              onClick={() => {
-                                const form = new FormData();
-                                form.set("intent", "redrive");
-                                form.set("id", job.id);
-                                fetcher.submit(form, { method: "post" });
-                              }}
-                            >
-                              Redrive
-                            </Button>
+                          {canRedrive || canDelete ? (
+                            <InlineStack gap="200" wrap={false}>
+                              {canRedrive && (
+                                <Button
+                                  size="slim"
+                                  loading={busy && redrivingId === job.id}
+                                  disabled={busy}
+                                  onClick={() => {
+                                    const form = new FormData();
+                                    form.set("intent", "redrive");
+                                    form.set("id", job.id);
+                                    fetcher.submit(form, { method: "post" });
+                                  }}
+                                >
+                                  Redrive
+                                </Button>
+                              )}
+                              {canDelete && (
+                                <Button
+                                  size="slim"
+                                  tone="critical"
+                                  loading={busy && deletingId === job.id}
+                                  disabled={busy}
+                                  onClick={() => {
+                                    if (
+                                      !window.confirm(
+                                        "Delete this record? This cannot be undone.",
+                                      )
+                                    ) {
+                                      return;
+                                    }
+                                    const form = new FormData();
+                                    form.set("intent", "delete");
+                                    form.set("id", job.id);
+                                    fetcher.submit(form, { method: "post" });
+                                  }}
+                                >
+                                  Delete
+                                </Button>
+                              )}
+                            </InlineStack>
                           ) : (
                             <Text as="span" tone="subdued">
                               —
