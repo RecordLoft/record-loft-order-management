@@ -171,4 +171,17 @@ jsonPayload.shop="record-loft.myshopify.com"
 jsonPayload.resourceId="7"
 
 jsonPayload.cold=true
+
+jsonPayload.component="product-description" jsonPayload.message:"product synced"
 ```
+
+### Log volume and the free tier
+
+Cloud Logging includes 50 GiB of ingestion per project per month free. This worker stays far below that because logging is bounded by design:
+
+- One `webhook completed` INFO line per webhook, plus one `product synced` INFO line only when a product actually changed (description and/or handle; skips add nothing). Redirect counts (`redirects=repointed:N,removed:M`) ride on that line, not on one line per redirect.
+- Every line has fixed, short fields (about 0.5 KB). Never log payloads, descriptions, metafield values, or per-item loops.
+- Even 100,000 webhooks a month is roughly 100 MB, about 0.2% of the free allowance. A full 10,000-listing re-sync adds about 10 MB.
+- Keep `DEBUG` out of production and keep new logs per webhook, not per item. If volume ever matters, add an exclusion filter on `jsonPayload.cold` health pings or `GET /` liveness requests before dropping real events.
+
+`product synced` fields: `changes` (`description`, `handle`, or `description+handle`), `handle` (`old->new`, only when renamed), `published` (on the Online Store), `redirects` (`n/a` when the handle did not change, `failed` when flattening could not run, else `repointed:N,removed:M`).

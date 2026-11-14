@@ -812,9 +812,12 @@ export async function syncProductDescription(
     };
   }
 
+  // "n/a" when the handle did not change, "failed" when flattening could not run.
+  let redirects = "n/a";
   if (nextHandle !== null) {
     // The handle is already changed, so a redirect problem must not fail the
     // sync (or trigger a retry). Log it and move on.
+    redirects = "failed";
     try {
       const flattened = await flattenRedirectsAfterHandleChange(
         graphql,
@@ -822,7 +825,9 @@ export async function syncProductDescription(
         // An unpublished product has no live page to point old links at.
         { repoint: productData.publishedOnOnlineStore },
       );
-      if (!flattened.ok) {
+      if (flattened.ok) {
+        redirects = `repointed:${flattened.repointed},removed:${flattened.removed}`;
+      } else {
         log.warn({
           message: "Redirect flatten skipped",
           component: "product-description",
@@ -839,6 +844,25 @@ export async function syncProductDescription(
       });
     }
   }
+
+  // One short line per product that actually changed (skips are already
+  // covered by the worker's "webhook completed" line). Fixed fields only, so
+  // each line stays well under 1 KB.
+  log.info({
+    message: "product synced",
+    component: "product-description",
+    resourceId: productGid,
+    changes: [
+      nextDescription !== null ? "description" : null,
+      nextHandle !== null ? "handle" : null,
+    ]
+      .filter(Boolean)
+      .join("+"),
+    handle:
+      nextHandle !== null ? `${productData.handle}->${nextHandle}` : undefined,
+    published: productData.publishedOnOnlineStore,
+    redirects,
+  });
 
   return { outcome: "updated" };
 }

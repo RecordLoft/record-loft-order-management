@@ -943,6 +943,38 @@ describe("syncProductDescription redirect flattening", () => {
     ).toBe(false);
   });
 
+  it("logs one compact 'product synced' line with the change and redirect counts", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const graphql = mockShop({
+        data: {
+          urlRedirects: {
+            nodes: [
+              { id: "r1", path: "/products/older", target: "/products/old-handle" },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
+      await syncProductDescription(graphql, "gid://shopify/Product/1");
+      const lines = spy.mock.calls
+        .map(([line]) => JSON.parse(String(line)))
+        .filter((entry) => entry.component === "product-description");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({
+        severity: "INFO",
+        handle: "old-handle->miles-davis-kind-of-blue-lp",
+        published: true,
+        redirects: "repointed:1,removed:0",
+      });
+      expect(lines[0].changes).toContain("handle");
+      expect(String(lines[0].message)).toContain("product synced");
+      expect(JSON.stringify(lines[0]).length).toBeLessThan(1024);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("still succeeds when the redirect lookup is denied", async () => {
     const graphql = mockShop({
       errors: [{ message: "Access denied for urlRedirects field." }],
