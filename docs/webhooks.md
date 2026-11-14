@@ -117,7 +117,7 @@ Pub/Sub retries on HTTP 500 while `attempts < 5` and the error is retryable. Exh
 | `DATABASE_URL` | Aiven (same as Netlify) |
 | `SHOPIFY_API_KEY` | Partner **Client ID** |
 | `SHOPIFY_API_SECRET` | Partner **Client secret** |
-| `SCOPES` | Same list as `shopify.app.toml` |
+| `SCOPES` | Same list as `shopify.app.toml`. Includes `read_online_store_navigation, write_online_store_navigation` so the product sync can flatten redirects after a handle change. After adding scopes, run `shopify app deploy`, update `SCOPES` on Netlify and Cloud Run, and approve the new permissions in Shopify admin. |
 | `SHOPIFY_APP_URL` | Netlify app URL (library init, not ingress) |
 | `ALLOWED_TOPICS` | Optional. Default is `products/create,products/update,orders/create,orders/cancelled,orders/fulfilled,refunds/create`. |
 
