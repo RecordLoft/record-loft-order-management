@@ -3,6 +3,7 @@ import {
   buildProductDescriptionHtml,
   desiredHandleBase,
   displayMetafieldValue,
+  flattenRedirectsAfterHandleChange,
   handleizeForUrl,
   MAX_HANDLE_LENGTH,
   parseMetafieldValue,
@@ -427,6 +428,10 @@ describe("syncProductDescription handle updates", () => {
     handle: string;
     title?: string;
     ebayTitle?: string;
+    /** Null = not published to the Online Store. Omitted = published. */
+    onlineStoreUrl?: string | null;
+    /** Drop the hidden record block so the description needs rebuilding. */
+    staleDescription?: boolean;
   }) {
     const nodes = [{ namespace: "vinyl", key: "artist", value: "Miles" }];
     if (opts.ebayTitle !== undefined) {
@@ -438,10 +443,12 @@ describe("syncProductDescription handle updates", () => {
           id: "gid://shopify/Product/1",
           title: opts.title ?? "Kind of Blue",
           handle: opts.handle,
-          descriptionHtml: buildProductDescriptionHtml(
-            "<p>Visible</p>",
-            artistFields("Miles"),
-          ),
+          ...(opts.onlineStoreUrl !== undefined
+            ? { onlineStoreUrl: opts.onlineStoreUrl }
+            : {}),
+          descriptionHtml: opts.staleDescription
+            ? "<p>Visible</p>"
+            : buildProductDescriptionHtml("<p>Visible</p>", artistFields("Miles")),
           metafields: {
             pageInfo: { hasNextPage: false, endCursor: null },
             nodes,
@@ -556,6 +563,96 @@ describe("syncProductDescription handle updates", () => {
     });
   });
 
+  it("still follows the eBay title when the product is not on the Online Store, but without a redirect", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(updateInput(graphql)).toEqual({
+      id: "gid://shopify/Product/1",
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: false,
+    });
+  });
+
+  it("updates description and handle together for an unpublished product", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+        staleDescription: true,
+      }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: false,
+    });
+    expect(updateInput(graphql)).toHaveProperty("descriptionHtml");
+  });
+
+  it("is a no-op for an unpublished product whose handle is already current", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "skipped" });
+  });
+
+  it("adds a redirect when the product is on the Online Store", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: "https://example.com/products/old",
+      }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: true,
+    });
+  });
+
+  it("gets the redirect once it is published and the title changes again", async () => {
+    // Same product, two syncs: unpublished first, then live with a new title.
+    const unpublished = mockShop(
+      productResponse({
+        handle: "kind-of-blue-copy",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await syncProductDescription(unpublished, "gid://shopify/Product/1");
+    expect(updateInput(unpublished)).toMatchObject({ redirectNewHandle: false });
+
+    const published = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp",
+        ebayTitle: "Miles Davis Kind Of Blue LP 180g",
+        onlineStoreUrl: "https://example.com/products/miles-davis-kind-of-blue-lp",
+      }),
+    );
+    await syncProductDescription(published, "gid://shopify/Product/1");
+    expect(updateInput(published)).toEqual({
+      id: "gid://shopify/Product/1",
+      handle: "miles-davis-kind-of-blue-lp-180g",
+      redirectNewHandle: true,
+    });
+  });
+
   it("does not write on dryRun", async () => {
     const graphql = mockShop(
       productResponse({ handle: "old", ebayTitle: "Miles Davis Kind Of Blue LP" }),
@@ -577,6 +674,304 @@ describe("syncProductDescription handle updates", () => {
       syncProductDescription(graphql, "gid://shopify/Product/1"),
     ).resolves.toMatchObject({ outcome: "error", code: "graphql_errors" });
     expect(updateInput(graphql as ReturnType<typeof mockShop>)).toBeUndefined();
+  });
+});
+
+describe("flattenRedirectsAfterHandleChange", () => {
+  type Redirect = { id: string; path: string; target: string };
+
+  /** In-memory redirect table that answers the lookup, update and delete calls. */
+  function mockRedirects(initial: Redirect[], opts?: { pageSize?: number }) {
+    const table = initial.map((r) => ({ ...r }));
+    const pageSize = opts?.pageSize ?? 100;
+    const graphql = vi.fn<GraphqlFn>(async (query, options) => {
+      const vars = options?.variables ?? {};
+      if (query.includes("UrlRedirectsByQuery")) {
+        const match = /^(path|target):"(.*)"$/.exec(String(vars.query));
+        if (!match) throw new Error(`unexpected search ${String(vars.query)}`);
+        const field = match[1] as "path" | "target";
+        // Fuzzy like Shopify's search: prefix matches come back too.
+        const hits = table.filter((r) => r[field].startsWith(match[2]));
+        const start = vars.after ? Number(vars.after) : 0;
+        const slice = hits.slice(start, start + pageSize);
+        const next = start + pageSize;
+        return jsonResponse({
+          data: {
+            urlRedirects: {
+              nodes: slice,
+              pageInfo: {
+                hasNextPage: next < hits.length,
+                endCursor: next < hits.length ? String(next) : null,
+              },
+            },
+          },
+        });
+      }
+      if (query.includes("UrlRedirectRepoint")) {
+        const row = table.find((r) => r.id === vars.id);
+        if (row) {
+          row.target = (vars.urlRedirect as { target: string }).target;
+        }
+        return jsonResponse({
+          data: { urlRedirectUpdate: { userErrors: [] } },
+        });
+      }
+      if (query.includes("UrlRedirectDelete")) {
+        const index = table.findIndex((r) => r.id === vars.id);
+        if (index >= 0) table.splice(index, 1);
+        return jsonResponse({
+          data: { urlRedirectDelete: { userErrors: [] } },
+        });
+      }
+      throw new Error("unexpected query");
+    });
+    return { graphql, table };
+  }
+
+  it("repoints redirects that targeted the old handle at the new one", async () => {
+    const { graphql, table } = mockRedirects([
+      { id: "r1", path: "/products/a", target: "/products/b" },
+      { id: "r2", path: "/products/b", target: "/products/c" },
+    ]);
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" }),
+    ).resolves.toEqual({ ok: true, repointed: 1, removed: 0 });
+    expect(table.find((r) => r.id === "r1")?.target).toBe("/products/d");
+    // Redirects that never pointed at the old handle are left alone.
+    expect(table.find((r) => r.id === "r2")?.target).toBe("/products/c");
+  });
+
+  it("ignores redirects that only share a prefix with the old handle", async () => {
+    const { graphql, table } = mockRedirects([
+      { id: "r1", path: "/products/x", target: "/products/b-1" },
+      { id: "r2", path: "/products/y", target: "/products/b" },
+    ]);
+    await flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" });
+    expect(table.find((r) => r.id === "r1")?.target).toBe("/products/b-1");
+    expect(table.find((r) => r.id === "r2")?.target).toBe("/products/d");
+  });
+
+  it("deletes a redirect from the new handle so it cannot shadow the live page", async () => {
+    const { graphql, table } = mockRedirects([
+      // Flip back: an earlier rename left new → old behind.
+      { id: "r1", path: "/products/d", target: "/products/b" },
+      // A stale redirect from the new handle to something unrelated.
+      { id: "r2", path: "/products/d", target: "/products/zzz" },
+      { id: "r3", path: "/products/keep", target: "/products/zzz" },
+    ]);
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" }),
+    ).resolves.toEqual({ ok: true, repointed: 0, removed: 2 });
+    expect(table.map((r) => r.id)).toEqual(["r3"]);
+  });
+
+  it("follows pagination", async () => {
+    const initial = Array.from({ length: 150 }, (_, i) => ({
+      id: `r${i}`,
+      path: `/products/old-${i}`,
+      target: "/products/b",
+    }));
+    const { graphql, table } = mockRedirects(initial, { pageSize: 100 });
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" }),
+    ).resolves.toMatchObject({ ok: true, repointed: 150 });
+    expect(table.every((r) => r.target === "/products/d")).toBe(true);
+  });
+
+  it("with repoint off, only clears redirects that would shadow the new handle", async () => {
+    const { graphql, table } = mockRedirects([
+      { id: "r1", path: "/products/a", target: "/products/b" },
+      { id: "r2", path: "/products/d", target: "/products/zzz" },
+    ]);
+    await expect(
+      flattenRedirectsAfterHandleChange(
+        graphql,
+        { oldHandle: "b", newHandle: "d" },
+        { repoint: false },
+      ),
+    ).resolves.toEqual({ ok: true, repointed: 0, removed: 1 });
+    expect(table.map((r) => r.id)).toEqual(["r1"]);
+    expect(table[0].target).toBe("/products/b");
+    expect(
+      graphql.mock.calls.some(([, o]) =>
+        String(o?.variables?.query).startsWith("target:"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does nothing when the handle did not change", async () => {
+    const { graphql } = mockRedirects([]);
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "b" }),
+    ).resolves.toEqual({ ok: true, repointed: 0, removed: 0 });
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "", newHandle: "b" }),
+    ).resolves.toEqual({ ok: true, repointed: 0, removed: 0 });
+    expect(graphql).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing scope instead of throwing", async () => {
+    const graphql = vi.fn<GraphqlFn>(async () =>
+      jsonResponse({
+        errors: [{ message: "Access denied for urlRedirects field." }],
+      }),
+    );
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" }),
+    ).resolves.toMatchObject({ ok: false, repointed: 0, removed: 0 });
+  });
+
+  it("stops and reports when a repoint is rejected", async () => {
+    const graphql = vi.fn<GraphqlFn>(async (query) => {
+      if (query.includes("UrlRedirectsByQuery")) {
+        return jsonResponse({
+          data: {
+            urlRedirects: {
+              nodes: [{ id: "r1", path: "/products/a", target: "/products/b" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        });
+      }
+      return jsonResponse({
+        data: {
+          urlRedirectUpdate: { userErrors: [{ message: "Target is invalid" }] },
+        },
+      });
+    });
+    await expect(
+      flattenRedirectsAfterHandleChange(graphql, { oldHandle: "b", newHandle: "d" }),
+    ).resolves.toEqual({
+      ok: false,
+      message: "Target is invalid",
+      repointed: 0,
+      removed: 0,
+    });
+  });
+});
+
+describe("syncProductDescription redirect flattening", () => {
+  function productJson(handle: string, onlineStoreUrl?: string | null) {
+    return {
+      data: {
+        product: {
+          id: "gid://shopify/Product/1",
+          title: "Kind of Blue",
+          handle,
+          ...(onlineStoreUrl !== undefined ? { onlineStoreUrl } : {}),
+          descriptionHtml: buildProductDescriptionHtml(
+            "<p>Visible</p>",
+            artistFields("Miles"),
+          ),
+          metafields: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [
+              { namespace: "vinyl", key: "artist", value: "Miles" },
+              { namespace: "custom", key: "ebay_title", value: "Miles Davis Kind Of Blue LP" },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  function mockShop(
+    redirectsResponse: unknown,
+    onlineStoreUrl?: string | null,
+  ) {
+    return vi.fn<GraphqlFn>(async (query) => {
+      if (query.includes("productUpdate")) {
+        return jsonResponse({ data: { productUpdate: { userErrors: [] } } });
+      }
+      if (query.includes("ProductIdByHandle")) {
+        return jsonResponse({ data: { productByIdentifier: null } });
+      }
+      if (query.includes("UrlRedirectsByQuery")) {
+        return jsonResponse(redirectsResponse);
+      }
+      if (query.includes("UrlRedirectRepoint")) {
+        return jsonResponse({ data: { urlRedirectUpdate: { userErrors: [] } } });
+      }
+      return jsonResponse(productJson("old-handle", onlineStoreUrl));
+    });
+  }
+
+  it("repoints older redirects at the new handle after a rename", async () => {
+    const graphql = mockShop({
+      data: {
+        urlRedirects: {
+          nodes: [
+            { id: "r1", path: "/products/older", target: "/products/old-handle" },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    });
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    const repoint = graphql.mock.calls.find(([q]) =>
+      String(q).includes("UrlRedirectRepoint"),
+    );
+    expect(repoint?.[1]).toEqual({
+      variables: {
+        id: "r1",
+        urlRedirect: { target: "/products/miles-davis-kind-of-blue-lp" },
+      },
+    });
+  });
+
+  it("does not repoint redirects for an unpublished product", async () => {
+    const graphql = mockShop(
+      {
+        data: {
+          urlRedirects: {
+            nodes: [
+              { id: "r1", path: "/products/older", target: "/products/old-handle" },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+      null,
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(
+      graphql.mock.calls.some(([q]) => String(q).includes("UrlRedirectRepoint")),
+    ).toBe(false);
+  });
+
+  it("still succeeds when the redirect lookup is denied", async () => {
+    const graphql = mockShop({
+      errors: [{ message: "Access denied for urlRedirects field." }],
+    });
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+  });
+
+  it("does not touch redirects on a dry run or when the handle is unchanged", async () => {
+    const dry = mockShop({ data: { urlRedirects: { nodes: [], pageInfo: {} } } });
+    await syncProductDescription(dry, "gid://shopify/Product/1", { dryRun: true });
+    expect(
+      dry.mock.calls.some(([q]) => String(q).includes("UrlRedirectsByQuery")),
+    ).toBe(false);
+
+    const same = vi.fn<GraphqlFn>(async (query) => {
+      if (query.includes("productUpdate")) {
+        return jsonResponse({ data: { productUpdate: { userErrors: [] } } });
+      }
+      if (query.includes("ProductIdByHandle")) {
+        return jsonResponse({ data: { productByIdentifier: null } });
+      }
+      return jsonResponse(productJson("miles-davis-kind-of-blue-lp"));
+    });
+    await syncProductDescription(same, "gid://shopify/Product/1");
+    expect(
+      same.mock.calls.some(([q]) => String(q).includes("UrlRedirectsByQuery")),
+    ).toBe(false);
   });
 });
 

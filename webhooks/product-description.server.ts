@@ -1,3 +1,5 @@
+import { log } from "./log.server";
+
 const HIDDEN_MARKER = '<div style="display: none !important;">';
 
 /** Metafields to include in the hidden Shop-channel block (order preserved). */
@@ -286,6 +288,7 @@ export const PRODUCT_METAFIELDS_QUERY = `#graphql
       id
       title
       handle
+      onlineStoreUrl
       descriptionHtml
       metafields(first: 100, after: $cursor) {
         pageInfo {
@@ -339,6 +342,8 @@ type MetafieldsPage = {
     id: string;
     title: string;
     handle?: string;
+    /** Null when the product is not published to the Online Store. */
+    onlineStoreUrl?: string | null;
     descriptionHtml: string;
     metafields: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -350,6 +355,8 @@ type MetafieldsPage = {
 export type FetchedProduct = {
   title: string;
   handle: string;
+  /** False only when Shopify says the product is not on the Online Store. */
+  publishedOnOnlineStore: boolean;
   descriptionHtml: string;
   metafields: ProductMetafield[];
 };
@@ -369,6 +376,7 @@ export async function fetchProductWithAllMetafields(
   let cursor: string | null = null;
   let title = "";
   let handle = "";
+  let publishedOnOnlineStore = true;
   let descriptionHtml = "";
 
   do {
@@ -398,6 +406,7 @@ export async function fetchProductWithAllMetafields(
     const product = json.data.product;
     title = product.title ?? "";
     handle = product.handle ?? "";
+    publishedOnOnlineStore = product.onlineStoreUrl !== null;
     descriptionHtml = product.descriptionHtml ?? "";
     allMetafields.push(...product.metafields.nodes.map(metafieldFromGraphNode));
 
@@ -411,7 +420,16 @@ export async function fetchProductWithAllMetafields(
     allMetafields,
   );
 
-  return { ok: true, product: { title, handle, descriptionHtml, metafields } };
+  return {
+    ok: true,
+    product: {
+      title,
+      handle,
+      publishedOnOnlineStore,
+      descriptionHtml,
+      metafields,
+    },
+  };
 }
 
 /** Product URL handles are capped here (matches the former Ablestar rule). */
@@ -512,6 +530,187 @@ export type GraphqlRequest = (
   options?: { variables?: Record<string, unknown> },
 ) => Promise<Response>;
 
+export const URL_REDIRECTS_QUERY = `#graphql
+  query UrlRedirectsByQuery($query: String!, $after: String) {
+    urlRedirects(first: 100, after: $after, query: $query) {
+      nodes {
+        id
+        path
+        target
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`;
+
+export const URL_REDIRECT_UPDATE_MUTATION = `#graphql
+  mutation UrlRedirectRepoint($id: ID!, $urlRedirect: UrlRedirectInput!) {
+    urlRedirectUpdate(id: $id, urlRedirect: $urlRedirect) {
+      urlRedirect {
+        id
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+export const URL_REDIRECT_DELETE_MUTATION = `#graphql
+  mutation UrlRedirectDelete($id: ID!) {
+    urlRedirectDelete(id: $id) {
+      deletedUrlRedirectId
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+/** Redirect pages to read per lookup (100 each); a product never has this many. */
+const MAX_REDIRECT_PAGES = 5;
+
+type RedirectNode = { id: string; path: string; target: string };
+
+export type FlattenRedirectsResult =
+  | { ok: true; repointed: number; removed: number }
+  | { ok: false; message: string; repointed: number; removed: number };
+
+/** Search values are quoted; drop characters that could break out of the quotes. */
+function quotedSearchValue(value: string): string {
+  return `"${value.replace(/["\\]/g, "")}"`;
+}
+
+async function findRedirects(
+  graphql: GraphqlRequest,
+  field: "path" | "target",
+  value: string,
+): Promise<{ ok: true; nodes: RedirectNode[] } | { ok: false; message: string }> {
+  const nodes: RedirectNode[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MAX_REDIRECT_PAGES; page += 1) {
+    const response = await graphql(URL_REDIRECTS_QUERY, {
+      variables: { query: `${field}:${quotedSearchValue(value)}`, after },
+    });
+    const json = (await response.json()) as {
+      data?: {
+        urlRedirects?: {
+          nodes: RedirectNode[];
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        };
+      };
+      errors?: unknown;
+    };
+    if (json.errors) {
+      return { ok: false, message: JSON.stringify(json.errors) };
+    }
+    const connection = json.data?.urlRedirects;
+    if (!connection) break;
+    // The search is fuzzy, so only keep exact matches.
+    for (const node of connection.nodes) {
+      if (node[field] === value) nodes.push(node);
+    }
+    if (!connection.pageInfo.hasNextPage) break;
+    after = connection.pageInfo.endCursor;
+  }
+  return { ok: true, nodes };
+}
+
+/**
+ * After a product's handle changes, keep every old URL one hop from the page:
+ * redirects that pointed at the old handle are repointed at the new one, and
+ * any redirect *from* the new handle (left over from an earlier rename) is
+ * deleted so it cannot shadow the live product. Shopify only adds the single
+ * old → new redirect itself, so without this old links turn into chains.
+ *
+ * Best effort. Needs `read_online_store_navigation` and
+ * `write_online_store_navigation`; without them it reports `ok: false` and the
+ * caller carries on.
+ */
+export async function flattenRedirectsAfterHandleChange(
+  graphql: GraphqlRequest,
+  handles: { oldHandle: string; newHandle: string },
+  options: { repoint?: boolean } = {},
+): Promise<FlattenRedirectsResult> {
+  const repoint = options.repoint ?? true;
+  const oldPath = `/products/${handles.oldHandle}`;
+  const newPath = `/products/${handles.newHandle}`;
+  let repointed = 0;
+  let removed = 0;
+  if (!handles.oldHandle || oldPath === newPath) {
+    return { ok: true, repointed, removed };
+  }
+
+  const fail = (message: string): FlattenRedirectsResult => ({
+    ok: false,
+    message,
+    repointed,
+    removed,
+  });
+
+  async function deleteRedirect(id: string): Promise<string | null> {
+    const response = await graphql(URL_REDIRECT_DELETE_MUTATION, {
+      variables: { id },
+    });
+    const json = (await response.json()) as {
+      data?: { urlRedirectDelete?: { userErrors: { message: string }[] } };
+      errors?: unknown;
+    };
+    if (json.errors) return JSON.stringify(json.errors);
+    const userErrors = json.data?.urlRedirectDelete?.userErrors ?? [];
+    return userErrors.length > 0
+      ? userErrors.map((e) => e.message).join("; ")
+      : null;
+  }
+
+  // Skipped for unpublished products: only the shadow cleanup below applies.
+  const pointingAtOld = repoint
+    ? await findRedirects(graphql, "target", oldPath)
+    : { ok: true as const, nodes: [] as RedirectNode[] };
+  if (!pointingAtOld.ok) return fail(pointingAtOld.message);
+
+  const deleted = new Set<string>();
+  for (const redirect of pointingAtOld.nodes) {
+    if (redirect.path === newPath) {
+      // new → old would now loop onto the live page: remove it.
+      const error = await deleteRedirect(redirect.id);
+      if (error) return fail(error);
+      deleted.add(redirect.id);
+      removed += 1;
+      continue;
+    }
+    const response = await graphql(URL_REDIRECT_UPDATE_MUTATION, {
+      variables: { id: redirect.id, urlRedirect: { target: newPath } },
+    });
+    const json = (await response.json()) as {
+      data?: { urlRedirectUpdate?: { userErrors: { message: string }[] } };
+      errors?: unknown;
+    };
+    if (json.errors) return fail(JSON.stringify(json.errors));
+    const userErrors = json.data?.urlRedirectUpdate?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      return fail(userErrors.map((e) => e.message).join("; "));
+    }
+    repointed += 1;
+  }
+
+  const shadowing = await findRedirects(graphql, "path", newPath);
+  if (!shadowing.ok) return fail(shadowing.message);
+  for (const redirect of shadowing.nodes) {
+    if (deleted.has(redirect.id)) continue;
+    const error = await deleteRedirect(redirect.id);
+    if (error) return fail(error);
+    removed += 1;
+  }
+
+  return { ok: true, repointed, removed };
+}
+
 export type DescriptionSyncResult =
   | { outcome: "updated" }
   | { outcome: "skipped" }
@@ -543,6 +742,9 @@ export async function syncProductDescription(
     selectedFields,
   );
 
+  // The handle always follows the eBay title, published or not, so it is
+  // already right the moment a product goes live. Only published products get
+  // a redirect from the old URL: an unpublished one has no public URL to keep.
   let nextHandle: string | null = null;
   const handleBase = desiredHandleBase(
     productData.title,
@@ -577,7 +779,7 @@ export async function syncProductDescription(
   if (nextDescription !== null) input.descriptionHtml = nextDescription;
   if (nextHandle !== null) {
     input.handle = nextHandle;
-    input.redirectNewHandle = true;
+    input.redirectNewHandle = productData.publishedOnOnlineStore;
   }
 
   const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
@@ -608,6 +810,34 @@ export async function syncProductDescription(
       code: "user_errors",
       message: userErrors.map((e) => e.message).join("; "),
     };
+  }
+
+  if (nextHandle !== null) {
+    // The handle is already changed, so a redirect problem must not fail the
+    // sync (or trigger a retry). Log it and move on.
+    try {
+      const flattened = await flattenRedirectsAfterHandleChange(
+        graphql,
+        { oldHandle: productData.handle, newHandle: nextHandle },
+        // An unpublished product has no live page to point old links at.
+        { repoint: productData.publishedOnOnlineStore },
+      );
+      if (!flattened.ok) {
+        log.warn({
+          message: "Redirect flatten skipped",
+          component: "product-description",
+          resourceId: productGid,
+          reason: flattened.message,
+        });
+      }
+    } catch (error) {
+      log.warn({
+        message: "Redirect flatten failed",
+        component: "product-description",
+        resourceId: productGid,
+        error,
+      });
+    }
   }
 
   return { outcome: "updated" };
