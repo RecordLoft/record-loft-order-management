@@ -428,6 +428,10 @@ describe("syncProductDescription handle updates", () => {
     handle: string;
     title?: string;
     ebayTitle?: string;
+    /** Null = not published to the Online Store. Omitted = published. */
+    onlineStoreUrl?: string | null;
+    /** Drop the hidden record block so the description needs rebuilding. */
+    staleDescription?: boolean;
   }) {
     const nodes = [{ namespace: "vinyl", key: "artist", value: "Miles" }];
     if (opts.ebayTitle !== undefined) {
@@ -439,10 +443,12 @@ describe("syncProductDescription handle updates", () => {
           id: "gid://shopify/Product/1",
           title: opts.title ?? "Kind of Blue",
           handle: opts.handle,
-          descriptionHtml: buildProductDescriptionHtml(
-            "<p>Visible</p>",
-            artistFields("Miles"),
-          ),
+          ...(opts.onlineStoreUrl !== undefined
+            ? { onlineStoreUrl: opts.onlineStoreUrl }
+            : {}),
+          descriptionHtml: opts.staleDescription
+            ? "<p>Visible</p>"
+            : buildProductDescriptionHtml("<p>Visible</p>", artistFields("Miles")),
           metafields: {
             pageInfo: { hasNextPage: false, endCursor: null },
             nodes,
@@ -554,6 +560,96 @@ describe("syncProductDescription handle updates", () => {
     await syncProductDescription(graphql, "gid://shopify/Product/1");
     expect(updateInput(graphql)).toMatchObject({
       handle: "miles-davis-kind-of-blue-lp",
+    });
+  });
+
+  it("still follows the eBay title when the product is not on the Online Store, but without a redirect", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(updateInput(graphql)).toEqual({
+      id: "gid://shopify/Product/1",
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: false,
+    });
+  });
+
+  it("updates description and handle together for an unpublished product", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+        staleDescription: true,
+      }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: false,
+    });
+    expect(updateInput(graphql)).toHaveProperty("descriptionHtml");
+  });
+
+  it("is a no-op for an unpublished product whose handle is already current", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "skipped" });
+  });
+
+  it("adds a redirect when the product is on the Online Store", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "old",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: "https://example.com/products/old",
+      }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: true,
+    });
+  });
+
+  it("gets the redirect once it is published and the title changes again", async () => {
+    // Same product, two syncs: unpublished first, then live with a new title.
+    const unpublished = mockShop(
+      productResponse({
+        handle: "kind-of-blue-copy",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+        onlineStoreUrl: null,
+      }),
+    );
+    await syncProductDescription(unpublished, "gid://shopify/Product/1");
+    expect(updateInput(unpublished)).toMatchObject({ redirectNewHandle: false });
+
+    const published = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp",
+        ebayTitle: "Miles Davis Kind Of Blue LP 180g",
+        onlineStoreUrl: "https://example.com/products/miles-davis-kind-of-blue-lp",
+      }),
+    );
+    await syncProductDescription(published, "gid://shopify/Product/1");
+    expect(updateInput(published)).toEqual({
+      id: "gid://shopify/Product/1",
+      handle: "miles-davis-kind-of-blue-lp-180g",
+      redirectNewHandle: true,
     });
   });
 
@@ -682,6 +778,27 @@ describe("flattenRedirectsAfterHandleChange", () => {
     expect(table.every((r) => r.target === "/products/d")).toBe(true);
   });
 
+  it("with repoint off, only clears redirects that would shadow the new handle", async () => {
+    const { graphql, table } = mockRedirects([
+      { id: "r1", path: "/products/a", target: "/products/b" },
+      { id: "r2", path: "/products/d", target: "/products/zzz" },
+    ]);
+    await expect(
+      flattenRedirectsAfterHandleChange(
+        graphql,
+        { oldHandle: "b", newHandle: "d" },
+        { repoint: false },
+      ),
+    ).resolves.toEqual({ ok: true, repointed: 0, removed: 1 });
+    expect(table.map((r) => r.id)).toEqual(["r1"]);
+    expect(table[0].target).toBe("/products/b");
+    expect(
+      graphql.mock.calls.some(([, o]) =>
+        String(o?.variables?.query).startsWith("target:"),
+      ),
+    ).toBe(false);
+  });
+
   it("does nothing when the handle did not change", async () => {
     const { graphql } = mockRedirects([]);
     await expect(
@@ -734,13 +851,14 @@ describe("flattenRedirectsAfterHandleChange", () => {
 });
 
 describe("syncProductDescription redirect flattening", () => {
-  function productJson(handle: string) {
+  function productJson(handle: string, onlineStoreUrl?: string | null) {
     return {
       data: {
         product: {
           id: "gid://shopify/Product/1",
           title: "Kind of Blue",
           handle,
+          ...(onlineStoreUrl !== undefined ? { onlineStoreUrl } : {}),
           descriptionHtml: buildProductDescriptionHtml(
             "<p>Visible</p>",
             artistFields("Miles"),
@@ -757,7 +875,10 @@ describe("syncProductDescription redirect flattening", () => {
     };
   }
 
-  function mockShop(redirectsResponse: unknown) {
+  function mockShop(
+    redirectsResponse: unknown,
+    onlineStoreUrl?: string | null,
+  ) {
     return vi.fn<GraphqlFn>(async (query) => {
       if (query.includes("productUpdate")) {
         return jsonResponse({ data: { productUpdate: { userErrors: [] } } });
@@ -771,7 +892,7 @@ describe("syncProductDescription redirect flattening", () => {
       if (query.includes("UrlRedirectRepoint")) {
         return jsonResponse({ data: { urlRedirectUpdate: { userErrors: [] } } });
       }
-      return jsonResponse(productJson("old-handle"));
+      return jsonResponse(productJson("old-handle", onlineStoreUrl));
     });
   }
 
@@ -798,6 +919,28 @@ describe("syncProductDescription redirect flattening", () => {
         urlRedirect: { target: "/products/miles-davis-kind-of-blue-lp" },
       },
     });
+  });
+
+  it("does not repoint redirects for an unpublished product", async () => {
+    const graphql = mockShop(
+      {
+        data: {
+          urlRedirects: {
+            nodes: [
+              { id: "r1", path: "/products/older", target: "/products/old-handle" },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+      null,
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(
+      graphql.mock.calls.some(([q]) => String(q).includes("UrlRedirectRepoint")),
+    ).toBe(false);
   });
 
   it("still succeeds when the redirect lookup is denied", async () => {

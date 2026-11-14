@@ -288,6 +288,7 @@ export const PRODUCT_METAFIELDS_QUERY = `#graphql
       id
       title
       handle
+      onlineStoreUrl
       descriptionHtml
       metafields(first: 100, after: $cursor) {
         pageInfo {
@@ -341,6 +342,8 @@ type MetafieldsPage = {
     id: string;
     title: string;
     handle?: string;
+    /** Null when the product is not published to the Online Store. */
+    onlineStoreUrl?: string | null;
     descriptionHtml: string;
     metafields: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -352,6 +355,8 @@ type MetafieldsPage = {
 export type FetchedProduct = {
   title: string;
   handle: string;
+  /** False only when Shopify says the product is not on the Online Store. */
+  publishedOnOnlineStore: boolean;
   descriptionHtml: string;
   metafields: ProductMetafield[];
 };
@@ -371,6 +376,7 @@ export async function fetchProductWithAllMetafields(
   let cursor: string | null = null;
   let title = "";
   let handle = "";
+  let publishedOnOnlineStore = true;
   let descriptionHtml = "";
 
   do {
@@ -400,6 +406,7 @@ export async function fetchProductWithAllMetafields(
     const product = json.data.product;
     title = product.title ?? "";
     handle = product.handle ?? "";
+    publishedOnOnlineStore = product.onlineStoreUrl !== null;
     descriptionHtml = product.descriptionHtml ?? "";
     allMetafields.push(...product.metafields.nodes.map(metafieldFromGraphNode));
 
@@ -413,7 +420,16 @@ export async function fetchProductWithAllMetafields(
     allMetafields,
   );
 
-  return { ok: true, product: { title, handle, descriptionHtml, metafields } };
+  return {
+    ok: true,
+    product: {
+      title,
+      handle,
+      publishedOnOnlineStore,
+      descriptionHtml,
+      metafields,
+    },
+  };
 }
 
 /** Product URL handles are capped here (matches the former Ablestar rule). */
@@ -619,7 +635,9 @@ async function findRedirects(
 export async function flattenRedirectsAfterHandleChange(
   graphql: GraphqlRequest,
   handles: { oldHandle: string; newHandle: string },
+  options: { repoint?: boolean } = {},
 ): Promise<FlattenRedirectsResult> {
+  const repoint = options.repoint ?? true;
   const oldPath = `/products/${handles.oldHandle}`;
   const newPath = `/products/${handles.newHandle}`;
   let repointed = 0;
@@ -650,7 +668,10 @@ export async function flattenRedirectsAfterHandleChange(
       : null;
   }
 
-  const pointingAtOld = await findRedirects(graphql, "target", oldPath);
+  // Skipped for unpublished products: only the shadow cleanup below applies.
+  const pointingAtOld = repoint
+    ? await findRedirects(graphql, "target", oldPath)
+    : { ok: true as const, nodes: [] as RedirectNode[] };
   if (!pointingAtOld.ok) return fail(pointingAtOld.message);
 
   const deleted = new Set<string>();
@@ -721,6 +742,9 @@ export async function syncProductDescription(
     selectedFields,
   );
 
+  // The handle always follows the eBay title, published or not, so it is
+  // already right the moment a product goes live. Only published products get
+  // a redirect from the old URL: an unpublished one has no public URL to keep.
   let nextHandle: string | null = null;
   const handleBase = desiredHandleBase(
     productData.title,
@@ -755,7 +779,7 @@ export async function syncProductDescription(
   if (nextDescription !== null) input.descriptionHtml = nextDescription;
   if (nextHandle !== null) {
     input.handle = nextHandle;
-    input.redirectNewHandle = true;
+    input.redirectNewHandle = productData.publishedOnOnlineStore;
   }
 
   const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
@@ -792,10 +816,12 @@ export async function syncProductDescription(
     // The handle is already changed, so a redirect problem must not fail the
     // sync (or trigger a retry). Log it and move on.
     try {
-      const flattened = await flattenRedirectsAfterHandleChange(graphql, {
-        oldHandle: productData.handle,
-        newHandle: nextHandle,
-      });
+      const flattened = await flattenRedirectsAfterHandleChange(
+        graphql,
+        { oldHandle: productData.handle, newHandle: nextHandle },
+        // An unpublished product has no live page to point old links at.
+        { repoint: productData.publishedOnOnlineStore },
+      );
       if (!flattened.ok) {
         log.warn({
           message: "Redirect flatten skipped",
