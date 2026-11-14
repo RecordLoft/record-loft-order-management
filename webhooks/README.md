@@ -10,8 +10,8 @@ Pub/Sub worker and handlers. `/app/webhooks-admin` is the dead-letter queue (fai
 | `log.server.ts` | Structured JSON lines for Log Explorer (`severity`, `message`, trace) |
 | `parse-pubsub.ts` | Decode the push envelope + Shopify attributes |
 | `queue.server.ts` | Coalesce, claim (`processing`), run, persist / delete `WebhookFailure` |
-| `product-description.handler.server.ts` | Rebuild product `descriptionHtml` |
-| `product-description.server.ts` | Description metafield → HTML |
+| `product-description.handler.server.ts` | Rebuild product `descriptionHtml` and URL handle |
+| `product-description.server.ts` | Description metafield → HTML; eBay title → URL handle |
 | `orders-create.handler.server.ts` | Import the order, apply pending cancel/refund/OSP, mark fulfillment in progress |
 | `orders-lifecycle.handler.server.ts` | `orders/cancelled`, `orders/fulfilled`, and `refunds/create` (full refund only; pending if the order is not imported yet) |
 | `shopify-fulfillment.server.ts` | Fulfillment-order progress mutations |

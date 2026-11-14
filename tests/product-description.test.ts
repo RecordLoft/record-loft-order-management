@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildProductDescriptionHtml,
+  desiredHandleBase,
   displayMetafieldValue,
+  handleizeForUrl,
+  MAX_HANDLE_LENGTH,
   parseMetafieldValue,
   selectedMetafieldsFromAll,
   stripHiddenRecordBlock,
@@ -152,6 +155,7 @@ describe("syncProductDescription", () => {
           product: {
             id: "gid://shopify/Product/1",
             title: "Kind of Blue",
+            handle: "kind-of-blue",
             descriptionHtml: current,
             metafields: {
               pageInfo: { hasNextPage: false, endCursor: null },
@@ -386,6 +390,196 @@ describe("syncProductDescription", () => {
   });
 });
 
+describe("handleizeForUrl and desiredHandleBase", () => {
+  it("lowercases, drops apostrophes and collapses symbols", () => {
+    expect(handleizeForUrl(`Don't Stop: Greatest Hits 12" (US)`)).toBe(
+      "dont-stop-greatest-hits-12-us",
+    );
+    expect(handleizeForUrl("Beyoncé – Lemonade")).toBe("beyonce-lemonade");
+    expect(handleizeForUrl("  ---  ")).toBe("");
+  });
+
+  it("caps length without a trailing hyphen", () => {
+    const handle = handleizeForUrl(`${"a".repeat(149)} bbbb`);
+    expect(handle.length).toBeLessThanOrEqual(MAX_HANDLE_LENGTH);
+    expect(handle.endsWith("-")).toBe(false);
+  });
+
+  it("prefers custom.ebay_title and falls back to the product title", () => {
+    expect(
+      desiredHandleBase("Product Title", [
+        { namespace: "custom", key: "ebay_title", value: "Miles Davis Kind Of Blue LP" },
+      ]),
+    ).toBe("miles-davis-kind-of-blue-lp");
+    expect(desiredHandleBase("Product Title", [])).toBe("product-title");
+    expect(
+      desiredHandleBase("Product Title", [
+        { namespace: "custom", key: "ebay_title", value: "   " },
+      ]),
+    ).toBe("product-title");
+  });
+});
+
+describe("syncProductDescription handle updates", () => {
+  type Owners = Record<string, string | null>;
+
+  function productResponse(opts: {
+    handle: string;
+    title?: string;
+    ebayTitle?: string;
+  }) {
+    const nodes = [{ namespace: "vinyl", key: "artist", value: "Miles" }];
+    if (opts.ebayTitle !== undefined) {
+      nodes.push({ namespace: "custom", key: "ebay_title", value: opts.ebayTitle });
+    }
+    return {
+      data: {
+        product: {
+          id: "gid://shopify/Product/1",
+          title: opts.title ?? "Kind of Blue",
+          handle: opts.handle,
+          descriptionHtml: buildProductDescriptionHtml(
+            "<p>Visible</p>",
+            artistFields("Miles"),
+          ),
+          metafields: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes,
+          },
+        },
+      },
+    };
+  }
+
+  function mockShop(
+    product: ReturnType<typeof productResponse>,
+    owners: Owners = {},
+  ) {
+    return vi.fn<GraphqlFn>(async (query, options) => {
+      if (query.includes("productUpdate")) {
+        return jsonResponse({ data: { productUpdate: { userErrors: [] } } });
+      }
+      if (query.includes("ProductIdByHandle")) {
+        const handle = String(options?.variables?.handle);
+        const id = owners[handle] ?? null;
+        return jsonResponse({
+          data: { productByIdentifier: id ? { id } : null },
+        });
+      }
+      return jsonResponse(product);
+    });
+  }
+
+  function updateInput(graphql: ReturnType<typeof mockShop>) {
+    const call = graphql.mock.calls.find(([query]) =>
+      String(query).includes("productUpdate"),
+    );
+    return (call?.[1] as { variables: { input: Record<string, unknown> } })
+      ?.variables.input;
+  }
+
+  it("sets the handle from the eBay title with a redirect", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "kind-of-blue-copy",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+      }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(updateInput(graphql)).toEqual({
+      id: "gid://shopify/Product/1",
+      handle: "miles-davis-kind-of-blue-lp",
+      redirectNewHandle: true,
+    });
+  });
+
+  it("falls back to the product title when the eBay title is blank", async () => {
+    const graphql = mockShop(
+      productResponse({ handle: "old", ebayTitle: "", title: "Kind of Blue" }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({ handle: "kind-of-blue" });
+  });
+
+  it("skips entirely when the handle and description are current", async () => {
+    const graphql = mockShop(
+      productResponse({ handle: "miles-davis-kind-of-blue-lp", ebayTitle: "Miles Davis Kind Of Blue LP" }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "skipped" });
+    expect(updateInput(graphql)).toBeUndefined();
+    expect(
+      graphql.mock.calls.some(([query]) => String(query).includes("ProductIdByHandle")),
+    ).toBe(false);
+  });
+
+  it("moves to the next free suffix when another product holds the handle", async () => {
+    const graphql = mockShop(
+      productResponse({ handle: "old", ebayTitle: "Miles Davis Kind Of Blue LP" }),
+      {
+        "miles-davis-kind-of-blue-lp": "gid://shopify/Product/2",
+        "miles-davis-kind-of-blue-lp-1": "gid://shopify/Product/3",
+      },
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp-2",
+    });
+  });
+
+  it("keeps a suffixed handle it already owns while the base stays taken", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp-1",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+      }),
+      { "miles-davis-kind-of-blue-lp": "gid://shopify/Product/2" },
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toEqual({ outcome: "skipped" });
+  });
+
+  it("returns to the base handle once it is free again", async () => {
+    const graphql = mockShop(
+      productResponse({
+        handle: "miles-davis-kind-of-blue-lp-1",
+        ebayTitle: "Miles Davis Kind Of Blue LP",
+      }),
+    );
+    await syncProductDescription(graphql, "gid://shopify/Product/1");
+    expect(updateInput(graphql)).toMatchObject({
+      handle: "miles-davis-kind-of-blue-lp",
+    });
+  });
+
+  it("does not write on dryRun", async () => {
+    const graphql = mockShop(
+      productResponse({ handle: "old", ebayTitle: "Miles Davis Kind Of Blue LP" }),
+    );
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1", { dryRun: true }),
+    ).resolves.toEqual({ outcome: "updated" });
+    expect(updateInput(graphql)).toBeUndefined();
+  });
+
+  it("retries when the handle lookup is throttled", async () => {
+    const graphql = vi.fn<GraphqlFn>(async (query) => {
+      if (query.includes("ProductIdByHandle")) {
+        return jsonResponse({ errors: [{ message: "Throttled" }] });
+      }
+      return jsonResponse(productResponse({ handle: "old" }));
+    });
+    await expect(
+      syncProductDescription(graphql, "gid://shopify/Product/1"),
+    ).resolves.toMatchObject({ outcome: "error", code: "graphql_errors" });
+    expect(updateInput(graphql as ReturnType<typeof mockShop>)).toBeUndefined();
+  });
+});
+
 describe("handleProductDescriptionSync", () => {
   it("does not retry product_not_found", async () => {
     const graphql = vi.fn(async () => jsonResponse({ data: { product: null } }));
@@ -419,6 +613,7 @@ describe("handleProductDescriptionSync", () => {
           product: {
             id: "gid://shopify/Product/1",
             title: "Kind of Blue",
+            handle: "kind-of-blue",
             descriptionHtml: current,
             metafields: {
               pageInfo: { hasNextPage: false, endCursor: null },
