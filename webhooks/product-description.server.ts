@@ -285,6 +285,7 @@ export const PRODUCT_METAFIELDS_QUERY = `#graphql
     product(id: $id) {
       id
       title
+      handle
       descriptionHtml
       metafields(first: 100, after: $cursor) {
         pageInfo {
@@ -337,6 +338,7 @@ type MetafieldsPage = {
   product: {
     id: string;
     title: string;
+    handle?: string;
     descriptionHtml: string;
     metafields: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -347,6 +349,7 @@ type MetafieldsPage = {
 
 export type FetchedProduct = {
   title: string;
+  handle: string;
   descriptionHtml: string;
   metafields: ProductMetafield[];
 };
@@ -365,6 +368,7 @@ export async function fetchProductWithAllMetafields(
   const allMetafields: ProductMetafield[] = [];
   let cursor: string | null = null;
   let title = "";
+  let handle = "";
   let descriptionHtml = "";
 
   do {
@@ -393,6 +397,7 @@ export async function fetchProductWithAllMetafields(
 
     const product = json.data.product;
     title = product.title ?? "";
+    handle = product.handle ?? "";
     descriptionHtml = product.descriptionHtml ?? "";
     allMetafields.push(...product.metafields.nodes.map(metafieldFromGraphNode));
 
@@ -406,7 +411,86 @@ export async function fetchProductWithAllMetafields(
     allMetafields,
   );
 
-  return { ok: true, product: { title, descriptionHtml, metafields } };
+  return { ok: true, product: { title, handle, descriptionHtml, metafields } };
+}
+
+/** Product URL handles are capped here (matches the former Ablestar rule). */
+export const MAX_HANDLE_LENGTH = 150;
+/** How many `-N` suffixes to try when the desired handle is taken. */
+const MAX_HANDLE_SUFFIX = 20;
+
+/** Lowercase, hyphen-separated, ASCII-only URL handle, capped in length. */
+export function handleizeForUrl(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_HANDLE_LENGTH)
+    .replace(/-+$/g, "");
+}
+
+/**
+ * The URL always follows the eBay title (`custom.ebay_title`), falling back to
+ * the product title when it is blank. Returns "" when neither yields a handle.
+ */
+export function desiredHandleBase(
+  productTitle: string,
+  metafields: ProductMetafield[],
+): string {
+  const ebayTitle = indexAllMetafields(metafields)
+    .get(metafieldLookupKey("custom", "ebay_title"))
+    ?.trim();
+  const fromEbay = isSetMetafieldValue(ebayTitle)
+    ? handleizeForUrl(ebayTitle)
+    : "";
+  return fromEbay || handleizeForUrl(productTitle);
+}
+
+export const PRODUCT_BY_HANDLE_QUERY = `#graphql
+  query ProductIdByHandle($handle: String!) {
+    productByIdentifier(identifier: { handle: $handle }) {
+      id
+    }
+  }
+`;
+
+export type HandleResolution =
+  | { ok: true; handle: string | null }
+  | { ok: false; message: string };
+
+/**
+ * Pick the handle this product should have: `base`, else `base-1`, `base-2`…
+ * Another product keeping a handle (including sold, unpublished ones) pushes
+ * this one to the next free suffix. Returns `handle: null` when nothing in
+ * range is free, so the caller leaves the URL alone.
+ */
+export async function resolveAvailableHandle(
+  graphql: GraphqlRequest,
+  productGid: string,
+  base: string,
+  currentHandle: string,
+): Promise<HandleResolution> {
+  for (let n = 0; n <= MAX_HANDLE_SUFFIX; n += 1) {
+    const candidate = n === 0 ? base : `${base}-${n}`;
+    if (candidate === currentHandle) return { ok: true, handle: candidate };
+
+    const response = await graphql(PRODUCT_BY_HANDLE_QUERY, {
+      variables: { handle: candidate },
+    });
+    const json = (await response.json()) as {
+      data?: { productByIdentifier?: { id: string } | null };
+      errors?: unknown;
+    };
+    if (json.errors) {
+      return { ok: false, message: JSON.stringify(json.errors) };
+    }
+    const owner = json.data?.productByIdentifier?.id;
+    if (!owner || owner === productGid) return { ok: true, handle: candidate };
+  }
+  return { ok: true, handle: null };
 }
 
 export const PRODUCT_UPDATE_MUTATION = `#graphql
@@ -433,7 +517,11 @@ export type DescriptionSyncResult =
   | { outcome: "skipped" }
   | { outcome: "error"; message: string; code?: string };
 
-/** Fetch all metafields, rebuild descriptionHtml, update when changed. */
+/**
+ * Fetch all metafields, then rebuild descriptionHtml and the URL handle
+ * (from the eBay title, else the product title), writing one productUpdate
+ * only when something changed. Handle changes leave a redirect from the old URL.
+ */
 export async function syncProductDescription(
   graphql: GraphqlRequest,
   productGid: string,
@@ -455,16 +543,42 @@ export async function syncProductDescription(
     selectedFields,
   );
 
-  if (nextDescription === null) {
+  let nextHandle: string | null = null;
+  const handleBase = desiredHandleBase(
+    productData.title,
+    productData.metafields,
+  );
+  if (handleBase) {
+    const resolution = await resolveAvailableHandle(
+      graphql,
+      productGid,
+      handleBase,
+      productData.handle,
+    );
+    if (!resolution.ok) {
+      return {
+        outcome: "error",
+        code: "graphql_errors",
+        message: resolution.message,
+      };
+    }
+    if (resolution.handle && resolution.handle !== productData.handle) {
+      nextHandle = resolution.handle;
+    }
+  }
+
+  if (nextDescription === null && nextHandle === null) {
     return { outcome: "skipped" };
   }
 
   if (options?.dryRun) return { outcome: "updated" };
 
-  const input: Record<string, unknown> = {
-    id: productGid,
-    descriptionHtml: nextDescription,
-  };
+  const input: Record<string, unknown> = { id: productGid };
+  if (nextDescription !== null) input.descriptionHtml = nextDescription;
+  if (nextHandle !== null) {
+    input.handle = nextHandle;
+    input.redirectNewHandle = true;
+  }
 
   const updateResponse = await graphql(PRODUCT_UPDATE_MUTATION, {
     variables: { input },
